@@ -1,7 +1,19 @@
 const express = require('express');
+// Polyfill for Node 18 environment where File is missing (needed by Supabase/Undici)
+const { Blob } = require('buffer');
+if (!global.Blob) global.Blob = Blob;
+if (!global.File) {
+  global.File = class File extends Blob {
+    constructor(parts, filename, properties) {
+      super(parts, properties);
+      this.name = filename;
+    }
+  };
+}
 const axios = require('axios');
 const cors = require('cors');
 const cheerio = require('cheerio');
+const { createClient } = require('@supabase/supabase-js');
 
 require('dotenv').config();
 
@@ -10,6 +22,49 @@ const PORT = process.env.PORT || 5000;
 
 app.use(cors({ origin: 'http://localhost:5173' })); // Allow Vite frontend
 app.use(express.json());
+
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_KEY;
+const supabase = createClient(supabaseUrl, supabaseKey);
+
+// Auth Middleware
+const authMiddleware = async (req, res, next) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (token) {
+    const { data: { user }, error } = await supabase.auth.getUser(token);
+    if (!error && user) {
+      req.user = user;
+    }
+  }
+  next();
+};
+
+app.use(authMiddleware);
+
+// Retrieve User Library
+app.get('/api/library', async (req, res) => {
+  if (!req.user) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  const { data, error } = await supabase
+    .from('user_library')
+    .select('saved_at, papers(*)')
+    .eq('user_id', req.user.id)
+    .order('saved_at', { ascending: false });
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  // Flatten structure for frontend
+  const library = data.map(item => ({
+    ...item.papers,
+    saved_at: item.saved_at
+  }));
+
+  res.json({ library });
+});
 
 // Search endpoint for PubMed
 app.get('/api/search', async (req, res) => {
@@ -62,61 +117,173 @@ app.get('/api/search', async (req, res) => {
 
 // Endpoint to summarize article using ChatGPT, split into sections
 app.post('/api/summarize', async (req, res) => {
-  const { title, abstract, journal, authors, publication_date } = req.body;
+  const { pmid, title, abstract, journal, authors, publication_date } = req.body;
   if (!title || !abstract) {
     return res.status(400).json({ error: 'Missing title or abstract for summarization' });
   }
+
   try {
+    // 1. Check Global Cache if PMID provided
+    if (pmid) {
+      const { data: cachedPaper } = await supabase
+        .from('papers')
+        .select('*')
+        .eq('pmid', pmid)
+        .single();
+
+      if (cachedPaper && cachedPaper.summary) {
+        console.log(`Cache hit for ${pmid}`);
+        // If user logged in, add to library
+        if (req.user) {
+          await supabase.from('user_library').upsert({
+            user_id: req.user.id,
+            paper_pmid: pmid
+          }, { onConflict: 'user_id, paper_pmid' });
+        }
+        return res.json({ summary: cachedPaper.summary });
+      }
+    }
+
     const openaiApiKey = process.env.OPENAI_API_KEY;
     if (!openaiApiKey) {
       return res.status(500).json({ error: 'OpenAI API key not configured' });
     }
-    async function getSection(sectionName, instructions) {
-      try {
-        const prompt = `Write the ${sectionName} section of a detailed academic summary for the following article. ${instructions}\n\nTitle: ${title}\nAuthors: ${authors?.join(', ')}\nJournal: ${journal}\nPublication Date: ${publication_date}\nAbstract: ${abstract}`;
-        const response = await axios.post('https://api.openai.com/v1/chat/completions', {
-          model: 'gpt-5',
-          messages: [
-            { role: 'system', content: 'You are an expert academic summarizer.' },
-            { role: 'user', content: prompt }
-          ],
-          max_completion_tokens: 2048
-        }, {
-          headers: {
-            'Authorization': `Bearer ${openaiApiKey}`,
-            'Content-Type': 'application/json'
-          }
-        });
-        if (!response.data.choices || !response.data.choices[0]?.message?.content) {
-          throw new Error(`No content returned for section: ${sectionName}`);
-        }
-        return response.data.choices[0].message.content;
-      } catch (err) {
-        console.error(`Error generating ${sectionName} section:`, err?.response?.data || err.message);
-        return `Error generating ${sectionName} section: ${err?.response?.data?.error?.message || err.message}`;
+    // Request a longer summary (2048 tokens)
+    const prompt = `Write a detailed academic summary (aim for 2048 tokens, up to 12000 characters) for the following article. Include background, methods, results, and discussion in a single, comprehensive narrative.\n\nTitle: ${title}\nAuthors: ${authors?.join(', ')}\nJournal: ${journal}\nPublication Date: ${publication_date}`;
+    const response = await axios.post('https://api.openai.com/v1/chat/completions', {
+      model: 'gpt-4o',
+      messages: [
+        { role: 'system', content: 'You are an expert academic summarizer.' },
+        { role: 'user', content: prompt }
+      ],
+      max_tokens: 2048
+    }, {
+      headers: {
+        'Authorization': `Bearer ${openaiApiKey}`,
+        'Content-Type': 'application/json'
+      }
+    });
+    let summary = response.data.choices?.[0]?.message?.content || '';
+    // Limit to 8000 characters for safety
+    if (summary.length > 12000) {
+      summary = summary.slice(0, 12000);
+    }
+
+    // 2. Persist to Global Papers
+    if (pmid) {
+      const { error: upsertError } = await supabase.from('papers').upsert({
+        pmid,
+        title,
+        authors,
+        journal,
+        publication_date,
+        abstract,
+        summary
+      }, { onConflict: 'pmid' });
+
+      if (upsertError) console.error('Supabase upsert error:', upsertError);
+
+      // 3. Add to User Library if logged in
+      if (req.user) {
+        await supabase.from('user_library').upsert({
+          user_id: req.user.id,
+          paper_pmid: pmid
+        }, { onConflict: 'user_id, paper_pmid' });
       }
     }
-    // Get each section
-    const intro = await getSection('Introduction', 'Explain the background, motivation, and context. Provide only the text; no titles. Provide your response as a single paragraph. Use 400-500 words.');
-    const methods = await getSection('Methods', 'Describe the methodology in detail, including any novel techniques. Provide only the text; no titles. Provide your response as a single paragraph. Use 600-700 words.');
-    const results = await getSection('Results', 'Summarize the main findings and outcomes. Provide only the text; no titles. Provide your response as a single paragraph. Use 400-500 words.');
-    const discussion = await getSection('Discussion', 'Discuss the implications, limitations, and future directions. Provide only the text; no titles. Provide your response as a single paragraph. Use 400-500 words.');
-    // Check for errors in any section
-    const summaryChunks = [
-      { section: 'Introduction', text: intro },
-      { section: 'Methods', text: methods },
-      { section: 'Results', text: results },
-      { section: 'Discussion', text: discussion }
-    ];
-    const hasError = summaryChunks.some(chunk => chunk.text.startsWith('Error generating'));
-    if (hasError) {
-      return res.status(502).json({ error: 'One or more sections failed to generate.', summaryChunks });
-    }
-    res.json({ summaryChunks, summary: `Introduction\n${intro}\n\nMethods\n${methods}\n\nResults\n${results}\n\nDiscussion\n${discussion}`});
-    //console.log(summaryChunks);
+
+    res.json({ summary });
   } catch (error) {
     console.error('Summary generation error:', error?.response?.data || error.message);
     res.status(500).json({ error: 'Failed to generate summary', details: error?.response?.data || error.message });
+  }
+});
+
+// Endpoint to convert summary to speech using OpenAI TTS
+app.post('/api/tts', async (req, res) => {
+  const { summary, pmid } = req.body;
+  if (!summary) {
+    return res.status(400).json({ error: 'Missing summary text for TTS' });
+  }
+  try {
+    // 1. Check if audio already exists in DB
+    if (pmid) {
+      const { data: paper } = await supabase
+        .from('papers')
+        .select('audio_path')
+        .eq('pmid', pmid)
+        .single();
+
+      if (paper && paper.audio_path) {
+        console.log(`Audio Cache hit for ${pmid}`);
+        const { data: fileData, error: downloadError } = await supabase.storage
+          .from('audio-summaries')
+          .download(paper.audio_path);
+
+        if (!downloadError && fileData) {
+          const buffer = Buffer.from(await fileData.arrayBuffer());
+          res.set({
+            'Content-Type': 'audio/mpeg',
+            'Content-Disposition': 'inline; filename="summary.mp3"'
+          });
+          return res.send(buffer);
+        }
+      }
+    }
+
+    // Generate audio as before (split into chunks, stitch together)
+    const chunkSize = 2000;
+    const chunks = [];
+    for (let i = 0; i < summary.length; i += chunkSize) {
+      chunks.push(summary.slice(i, i + chunkSize));
+    }
+    const openaiApiKey = process.env.OPENAI_API_KEY;
+    const audioBuffers = [];
+    for (const chunk of chunks) {
+      const ttsRes = await axios.post('https://api.openai.com/v1/audio/speech', {
+        model: 'tts-1',
+        input: chunk,
+        voice: 'alloy',
+        speed: 1.15,
+        response_format: 'mp3'
+      }, {
+        headers: {
+          'Authorization': `Bearer ${openaiApiKey}`,
+          'Content-Type': 'application/json'
+        },
+        responseType: 'arraybuffer'
+      });
+      audioBuffers.push(Buffer.from(ttsRes.data));
+    }
+    const stitchedAudio = Buffer.concat(audioBuffers);
+
+    // 2. Upload to Supabase Storage and Update DB if PMID exists
+    if (pmid) {
+      const fileName = `${pmid}_${Date.now()}.mp3`;
+      const { error: uploadError } = await supabase.storage
+        .from('audio-summaries')
+        .upload(fileName, stitchedAudio, {
+          contentType: 'audio/mpeg'
+        });
+
+      if (!uploadError) {
+        await supabase
+          .from('papers')
+          .update({ audio_path: fileName })
+          .eq('pmid', pmid);
+      } else {
+        console.error('Storage upload error:', uploadError);
+      }
+    }
+
+    res.set({
+      'Content-Type': 'audio/mpeg',
+      'Content-Disposition': 'inline; filename="summary.mp3"'
+    });
+    res.send(stitchedAudio);
+  } catch (error) {
+    console.error('TTS error:', error?.response?.data || error.message);
+    res.status(500).json({ error: 'Failed to generate TTS audio', details: error?.response?.data || error.message });
   }
 });
 

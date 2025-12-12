@@ -7,7 +7,9 @@ A Vite React TypeScript app for searching academic papers, retrieving PDFs, summ
 - Retrieve PDF of selected papers
 - Summarize papers to 2000 words
 - Text-to-speech for summaries
+- Modal audio playback
 - (Planned) User authentication and summary storage
+- (Planned) Payment functionality
 
 ## Getting Started
 1. Install dependencies:
@@ -36,3 +38,28 @@ nvm use 24.6.0 && node -v && npm -v && npm run dev
 cd server && nvm use 24.6.0 && npm start
 ```
 
+## Development ideas
+- add login functionality
+- make a queue that users can continue adding papers to
+- add payment functionality
+
+## Setup (with Supabase)
+1. Create a Supabase project at https://supabase.com/
+2. Enable authentication (email/password recommended)
+3. Create tables for users, payment details, and audio recordings
+4. Enable Supabase Storage for audio files
+5. Add your Supabase URL and Service Role Key to `.env`:
+   ```
+   SUPABASE_URL=your_supabase_url
+   SUPABASE_SERVICE_ROLE_KEY=your_service_role_key
+   ```
+6. Install Supabase client:
+   ```
+   npm install @supabase/supabase-js
+   ```
+
+## Next Steps
+- Add login/signup UI to frontend
+- Store/retrieve audio recordings for users
+- Save payment details securely
+- Check for existing audio before regenerating
