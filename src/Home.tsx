@@ -1,12 +1,14 @@
 
 import { useState, useEffect } from 'react'
+import { supabase } from './supabaseClient'
 import type { Session } from '@supabase/supabase-js'
 
 interface HomeProps {
     session: Session | null;
+    authLoading: boolean;
 }
 
-export default function Home({ session }: HomeProps) {
+export default function Home({ session, authLoading }: HomeProps) {
     const [query, setQuery] = useState('')
     const [results, setResults] = useState<any[]>([])
     const [loading, setLoading] = useState(false)
@@ -24,11 +26,18 @@ export default function Home({ session }: HomeProps) {
     const [audioLoading, setAudioLoading] = useState(false);
     const [audioError, setAudioError] = useState('');
 
+    const [recommendations, setRecommendations] = useState<any[]>([])
+    const [recLoading, setRecLoading] = useState(false)
+    const [recError, setRecError] = useState('')
+    const [recType, setRecType] = useState('Trending Today')
+
     const handleSearch = async (e: React.FormEvent) => {
         e.preventDefault()
         setLoading(true)
         setError('')
         setResults([])
+        // Clear recommendations when searching
+        setRecommendations([])
         try {
             const res = await fetch(`http://localhost:5001/api/search?q=${encodeURIComponent(query)}`)
             const data = await res.json()
@@ -40,13 +49,61 @@ export default function Home({ session }: HomeProps) {
         }
     }
 
+    // Fetch Recommendations on Mount
     useEffect(() => {
-        // Restore previous search results if available
-        if ((window.history.state && window.history.state.usr) && window.history.state.usr.results) {
-            setResults(window.history.state.usr.results)
-            setQuery(window.history.state.usr.query || '')
+        // Wait for auth to initialize before fetching
+        if (authLoading) return;
+
+        const fetchRecommendations = async () => {
+            setRecLoading(true);
+            try {
+                const headers: Record<string, string> = {};
+                if (session?.access_token) {
+                    headers['Authorization'] = `Bearer ${session.access_token}`;
+                }
+
+                // Check for Custom Keywords in Supabase via user_settings table
+                let customKeywords = '';
+                if (session) {
+                    try {
+                        const { data } = await supabase
+                            .from('user_settings')
+                            .select('keywords')
+                            .eq('user_id', session.user.id)
+                            .single();
+                        if (data && data.keywords) {
+                            customKeywords = data.keywords;
+                        }
+                    } catch (err) {
+                        // Ignore error (e.g. no settings found), fallback to default
+                    }
+                }
+
+                const res = await fetch(`http://localhost:5001/api/recommendations?keywords=${encodeURIComponent(customKeywords)}`, { headers });
+                const data = await res.json();
+                setRecommendations(data.results || []);
+                if (data.type) setRecType(data.type);
+            } catch (err) {
+                console.error('Failed to load recommendations');
+                setRecError('Could not load recommendations. Please try again later.');
+            } finally {
+                setRecLoading(false);
+            }
+        };
+
+        // Check if we have valid restoration state
+        const restoredResults = window.history.state?.usr?.results;
+        const restoredQuery = window.history.state?.usr?.query;
+
+        if (restoredResults && restoredResults.length > 0) {
+            setResults(restoredResults);
+            setQuery(restoredQuery || '');
+        } else {
+            // Only fetch recommendations if we aren't restoring a valid search
+            // And if the current state is empty (handled by component mount usually)
+            fetchRecommendations();
         }
-    }, [])
+    }, [session, authLoading]); // Re-fetch when auth finishes or session changes
 
     const openPaperModal = (paper: any) => {
         setSelectedPaper(paper);
@@ -167,8 +224,20 @@ export default function Home({ session }: HomeProps) {
             </form>
             {loading && <p>Loading...</p>}
             {error && <p style={{ color: 'red' }}>{error}</p>}
+
+            {/* Recommendations Header */}
+            {!loading && !query && results.length === 0 && (
+                <div style={{ width: '100%', maxWidth: '700px', marginBottom: '10px' }}>
+                    <h2 style={{ fontSize: '1.2rem', color: 'var(--text-secondary)', fontWeight: 500 }}>
+                        {recLoading ? 'Finding articles for you...' : (recError ? 'Error' : recType)}
+                    </h2>
+                    {recError && <p style={{ color: 'red' }}>{recError}</p>}
+                </div>
+            )}
+
             <ul className="results-list">
-                {results.map((paper, idx) => (
+                {/* Display either search results OR recommendations */}
+                {(results.length > 0 ? results : recommendations).map((paper, idx) => (
                     <li key={idx} className="result-item">
                         <a
                             href="#"
@@ -190,13 +259,19 @@ export default function Home({ session }: HomeProps) {
                     </li>
                 ))}
             </ul>
+            {!loading && !recLoading && !query && results.length === 0 && recommendations.length === 0 && !recError && (
+                <div style={{ textAlign: 'center', color: 'var(--text-secondary)', marginTop: '40px' }}>
+                    <p>No articles found.</p>
+                    <p style={{ fontSize: '0.9rem' }}>Try adjusting your keywords in Settings.</p>
+                </div>
+            )}
             {showModal && selectedPaper && (
                 <div className="modal-overlay" onClick={() => setShowModal(false)}>
                     <div className="modal-content" onClick={e => e.stopPropagation()}>
                         <button className="modal-close" onClick={() => setShowModal(false)}>&times;</button>
                         <h2>{selectedPaper.title}</h2>
 
-                        <div style={{ marginBottom: '16px', fontSize: '0.98rem', color: '#444' }}>
+                        <div style={{ marginBottom: '16px', fontSize: '0.98rem', color: 'var(--text-secondary)' }}>
                             <div><strong>Authors:</strong> {selectedPaper.authors?.join(', ') || 'No authors listed'}</div>
                             <div><strong>Journal:</strong> {selectedPaper.journal || 'No journal listed'}</div>
                             <div><strong>Publication Date:</strong> {selectedPaper.publication_date || 'No publication date listed'}</div>
@@ -219,15 +294,14 @@ export default function Home({ session }: HomeProps) {
 
                         {!modalLoading && !modalError && summary && (
                             <div style={{ marginTop: '16px' }}>
-                                <h3>Summary</h3>
-                                <div style={{ whiteSpace: 'pre-wrap', maxHeight: '300px', overflowY: 'auto', marginBottom: '16px' }}>
+                                <div className="summary-text" style={{ maxHeight: '300px', overflowY: 'auto', marginBottom: '16px' }}>
                                     {summary}
                                 </div>
 
                                 {audioLoading && <p>Loading audio...</p>}
                                 {audioError && <p style={{ color: 'red' }}>{audioError}</p>}
                                 {audioUrl && (
-                                    <audio controls src={audioUrl} style={{ width: '100%' }}>
+                                    <audio controls src={audioUrl}>
                                         Your browser does not support the audio element.
                                     </audio>
                                 )}

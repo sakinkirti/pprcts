@@ -20,7 +20,7 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(cors({ origin: 'http://localhost:5173' })); // Allow Vite frontend
+app.use(cors()); // Allow all origins (for local dev safety)
 app.use(express.json());
 
 const supabaseUrl = process.env.SUPABASE_URL;
@@ -66,27 +66,24 @@ app.get('/api/library', async (req, res) => {
   res.json({ library });
 });
 
-// Search endpoint for PubMed
-app.get('/api/search', async (req, res) => {
-  const query = req.query.q;
-  if (!query) {
-    return res.status(400).json({ error: 'Missing search query' });
-  }
+// Helper function to fetch PubMed results
+const fetchPubMedResults = async (query, retmax = 20) => {
   try {
-    // Use PubMed E-utilities API
-    const esearchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=${encodeURIComponent(query)}&retmax=20&retmode=json`;
+    const esearchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=${encodeURIComponent(query)}&retmax=${retmax}&retmode=json`;
     const esearchRes = await axios.get(esearchUrl);
     const idList = esearchRes.data.esearchresult.idlist;
+
     if (!idList || idList.length === 0) {
-      return res.json({ results: [] });
+      return [];
     }
-    // Fetch details for each PubMed ID
+
     const efetchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id=${idList.join(',')}&retmode=xml`;
     const efetchRes = await axios.get(efetchUrl);
     const xml = efetchRes.data;
     const cheerioXml = cheerio.load(xml, { xmlMode: true });
     const articles = cheerioXml('PubmedArticle');
     const results = [];
+
     articles.each((i, el) => {
       const $a = cheerioXml(el);
       const title = $a.find('ArticleTitle').text();
@@ -99,6 +96,7 @@ app.get('/api/search', async (req, res) => {
       const pubDate = $a.find('PubDate Year').text() || $a.find('PubDate MedlineDate').text();
       const abstract = $a.find('Abstract AbstractText').text();
       const pmid = $a.find('PMID').text();
+
       results.push({
         title,
         authors,
@@ -109,9 +107,53 @@ app.get('/api/search', async (req, res) => {
         link: `https://pubmed.ncbi.nlm.nih.gov/${pmid}/`
       });
     });
+
+    return results;
+  } catch (error) {
+    console.error('PubMed Fetch Error:', error.message);
+    throw error;
+  }
+};
+
+// Search endpoint for PubMed
+app.get('/api/search', async (req, res) => {
+  const query = req.query.q;
+  if (!query) {
+    return res.status(400).json({ error: 'Missing search query' });
+  }
+  try {
+    const results = await fetchPubMedResults(query);
     res.json({ results });
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch results', details: error.message });
+  }
+});
+
+// Recommendations Endpoint
+app.get('/api/recommendations', async (req, res) => {
+  try {
+    let searchTerm = '("Nature"[Journal] OR "Science"[Journal] OR "Cell"[Journal]) AND 2024/01:2025/12[dp]';
+    let recommendationType = 'Trending Today';
+
+    // 1. Check for Custom Keywords from Client
+    const customKeywords = req.query.keywords;
+    console.log('[DEBUG] Received Keywords:', customKeywords);
+
+    if (customKeywords && customKeywords.trim() !== '') {
+      searchTerm = customKeywords;
+      recommendationType = `Based on your interest in "${customKeywords}"`;
+    }
+
+    console.log('[DEBUG] Searching PubMed for:', searchTerm);
+
+    // 2. Search PubMed
+    const results = await fetchPubMedResults(searchTerm);
+    console.log('[DEBUG] Found Results:', results.length);
+    res.json({ results, type: recommendationType });
+
+  } catch (error) {
+    console.error('Recommendations Error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch recommendations' });
   }
 });
 

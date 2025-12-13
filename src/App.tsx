@@ -4,10 +4,12 @@ import './App.css'
 import { supabase } from './supabaseClient'
 import type { Session } from '@supabase/supabase-js'
 import Home from './Home'
-import Library from './Library'
+import Settings from './Settings'
+import Library from './Library' // Assuming Library component is needed based on routes
 
 function AppContent() {
   const [session, setSession] = useState<Session | null>(null)
+  const [authLoading, setAuthLoading] = useState(true) // Start loading
   const [menuOpen, setMenuOpen] = useState(false)
   const navigate = useNavigate();
   const location = useLocation();
@@ -15,6 +17,7 @@ function AppContent() {
   const getPageTitle = () => {
     switch (location.pathname) {
       case '/library': return 'My Library';
+      case '/settings': return 'Settings';
       case '/': return 'Home';
       default: return 'Shortcuts';
     }
@@ -23,12 +26,15 @@ function AppContent() {
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session)
+      setAuthLoading(false) // Finished loading initial session
     })
 
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session)
+      // Note: onAuthStateChange fires immediately too, but getSession handles the initial load check better usually
+      setAuthLoading(false)
     })
 
     return () => subscription.unsubscribe()
@@ -73,6 +79,7 @@ function AppContent() {
               {session ? (
                 <>
                   <Link to="/library" onClick={() => setMenuOpen(false)} className="dropdown-link">My Library</Link>
+                  <Link to="/settings" onClick={() => setMenuOpen(false)} className="dropdown-link">Settings</Link>
                   <hr className="menu-divider" />
                   <div className="menu-email">{session.user.email}</div>
                   <button
@@ -96,8 +103,9 @@ function AppContent() {
       </header>
 
       <Routes>
-        <Route path="/" element={<Home session={session} />} />
+        <Route path="/" element={<Home session={session} authLoading={authLoading} />} />
         <Route path="/library" element={<Library session={session} />} />
+        <Route path="/settings" element={<Settings session={session} />} />
       </Routes>
     </div>
   )

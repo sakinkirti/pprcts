@@ -88,7 +88,8 @@ h1 {
   max-width: 700px;
 }
 
-.search-form input {
+.search-form input,
+.settings-input {
   flex: 1;
   padding: 12px 20px;
   /* Added horizontal padding for pill shape */
@@ -102,7 +103,8 @@ h1 {
   color: var(--text-primary);
 }
 
-.search-form input:focus {
+.search-form input:focus,
+.settings-input:focus {
   border-color: var(--accent);
 }
 
@@ -334,7 +336,8 @@ audio {
 }
 
 .home-container,
-.library-container {
+.library-container,
+.settings-container {
   width: 100%;
   display: flex;
   flex-direction: column;

@@ -147,7 +147,11 @@ export default function Library({ session }: LibraryProps) {
 
             {loading && <p>Loading library...</p>}
             {error && <p style={{ color: 'red' }}>{error}</p>}
-            {!loading && papers.length === 0 && <p>No saved papers yet.</p>}
+            {!loading && papers.length === 0 && (
+                <div style={{ textAlign: 'center', color: 'var(--text-secondary)', marginTop: '40px' }}>
+                    <p>No saved papers yet.</p>
+                </div>
+            )}
 
             <ul className="results-list">
                 {papers.map((paper, idx) => (
