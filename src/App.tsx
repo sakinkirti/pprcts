@@ -6,10 +6,17 @@ import type { Session } from '@supabase/supabase-js'
 import Home from './Home'
 import Settings from './Settings'
 import Library from './Library' // Assuming Library component is needed based on routes
+import MiniPlayer from './MiniPlayer'
+
+interface GlobalAudio {
+  url: string;
+  title: string;
+}
 
 function AppContent() {
   const [session, setSession] = useState<Session | null>(null)
   const [authLoading, setAuthLoading] = useState(true) // Start loading
+  const [globalAudio, setGlobalAudio] = useState<GlobalAudio | null>(null)
   const [menuOpen, setMenuOpen] = useState(false)
   const navigate = useNavigate();
   const location = useLocation();
@@ -103,10 +110,18 @@ function AppContent() {
       </header>
 
       <Routes>
-        <Route path="/" element={<Home session={session} authLoading={authLoading} />} />
-        <Route path="/library" element={<Library session={session} />} />
+        <Route path="/" element={<Home session={session} authLoading={authLoading} setGlobalAudio={setGlobalAudio} />} />
+        <Route path="/library" element={<Library session={session} setGlobalAudio={setGlobalAudio} />} />
         <Route path="/settings" element={<Settings session={session} />} />
       </Routes>
+
+      {globalAudio && (
+        <MiniPlayer
+          audioUrl={globalAudio.url}
+          title={globalAudio.title}
+          onClose={() => setGlobalAudio(null)}
+        />
+      )}
     </div>
   )
 }

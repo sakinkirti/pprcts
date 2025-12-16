@@ -6,9 +6,10 @@ import type { Session } from '@supabase/supabase-js'
 interface HomeProps {
     session: Session | null;
     authLoading: boolean;
+    setGlobalAudio: (audio: { url: string; title: string } | null) => void;
 }
 
-export default function Home({ session, authLoading }: HomeProps) {
+export default function Home({ session, authLoading, setGlobalAudio }: HomeProps) {
     const [query, setQuery] = useState('')
     const [results, setResults] = useState<any[]>([])
     const [loading, setLoading] = useState(false)
@@ -294,16 +295,32 @@ export default function Home({ session, authLoading }: HomeProps) {
 
                         {!modalLoading && !modalError && summary && (
                             <div style={{ marginTop: '16px' }}>
-                                <div className="summary-text" style={{ maxHeight: '300px', overflowY: 'auto', marginBottom: '16px' }}>
-                                    {summary}
-                                </div>
-
                                 {audioLoading && <p>Loading audio...</p>}
                                 {audioError && <p style={{ color: 'red' }}>{audioError}</p>}
                                 {audioUrl && (
-                                    <audio controls src={audioUrl}>
-                                        Your browser does not support the audio element.
-                                    </audio>
+                                    <div style={{ marginTop: '20px' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                                            <h3 style={{ fontSize: '1rem', margin: 0 }}>Audio Summary</h3>
+                                            <button
+                                                onClick={() => {
+                                                    if (selectedPaper && audioUrl) {
+                                                        setGlobalAudio({
+                                                            url: audioUrl,
+                                                            title: selectedPaper.title
+                                                        });
+                                                        setShowModal(false);
+                                                    }
+                                                }}
+                                                className="action-btn"
+                                                style={{ fontSize: '0.85rem', padding: '6px 12px' }}
+                                            >
+                                                Minimize
+                                            </button>
+                                        </div>
+                                        <audio controls src={audioUrl}>
+                                            Your browser does not support the audio element.
+                                        </audio>
+                                    </div>
                                 )}
                             </div>
                         )}

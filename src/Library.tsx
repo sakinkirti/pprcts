@@ -1,12 +1,14 @@
 
 import { useState, useEffect } from 'react'
+import { supabase } from './supabaseClient'
 import type { Session } from '@supabase/supabase-js'
 
 interface LibraryProps {
     session: Session | null;
+    setGlobalAudio: (audio: { url: string; title: string } | null) => void;
 }
 
-export default function Library({ session }: LibraryProps) {
+export default function Library({ session, setGlobalAudio }: LibraryProps) {
     const [papers, setPapers] = useState<any[]>([])
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState('')
@@ -198,10 +200,30 @@ export default function Library({ session }: LibraryProps) {
                         {modalLoading && <p>Loading...</p>}
                         {summary && (
                             <div>
-                                <h3>Summary</h3>
-                                <div className="summary-text">{summary}</div>
                                 {audioError && <p style={{ color: 'red' }}>{audioError}</p>}
-                                {audioUrl && <audio controls src={audioUrl} />}
+                                {audioUrl && (
+                                    <div style={{ marginTop: '20px' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                                            <h3 style={{ fontSize: '1rem', margin: 0 }}>Audio Summary</h3>
+                                            <button
+                                                onClick={() => {
+                                                    if (selectedPaper && audioUrl) {
+                                                        setGlobalAudio({
+                                                            url: audioUrl,
+                                                            title: selectedPaper.title
+                                                        });
+                                                        setShowModal(false);
+                                                    }
+                                                }}
+                                                className="action-btn"
+                                                style={{ fontSize: '0.85rem', padding: '6px 12px' }}
+                                            >
+                                                Minimize
+                                            </button>
+                                        </div>
+                                        <audio controls src={audioUrl} />
+                                    </div>
+                                )}
                                 {audioLoading && <p>Loading audio...</p>}
                             </div>
                         )}

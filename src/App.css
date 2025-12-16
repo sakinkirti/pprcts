@@ -345,6 +345,142 @@ audio {
   width: 100%;
 }
 
+/* Mini Player Styles */
+.mini-player {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  width: 360px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  z-index: 1000;
+}
+
+.mini-player-title {
+  font-size: 0.9rem;
+  margin-bottom: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.mini-player-controls {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.mini-player-play-btn {
+  background: rgba(0, 0, 0, 0.1);
+  /* Light gray in light mode */
+  color: var(--text-primary);
+  border: none;
+  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  /* Prevent squishing */
+  min-height: 32px;
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s;
+  flex-shrink: 0;
+  padding: 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  .mini-player-play-btn {
+    background: rgba(255, 255, 255, 0.1);
+    /* Dark gray in dark mode */
+    color: white;
+  }
+}
+
+.mini-player-play-btn:hover {
+  background: #667eea;
+  /* Purple on hover */
+  color: white;
+}
+
+.mini-player-play-btn:active {
+  transform: scale(0.95);
+}
+
+.mini-player-progress-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mini-player-progress-bar {
+  height: 6px;
+  background: var(--bg-secondary);
+  border-radius: 3px;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+
+.mini-player-progress-fill {
+  height: 100%;
+  background: #667eea;
+  /* Match play button hover color */
+  border-radius: 3px;
+  transition: width 0.1s linear;
+}
+
+.mini-player-time {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.mini-player-close-btn {
+  background: rgba(0, 0, 0, 0.1);
+  /* Light gray in light mode */
+  color: var(--text-primary);
+  border: none;
+  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  /* Prevent squishing */
+  min-height: 32px;
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s, color 0.2s;
+  flex-shrink: 0;
+  padding: 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  .mini-player-close-btn {
+    background: rgba(255, 255, 255, 0.1);
+    /* Dark gray in dark mode */
+    color: white;
+  }
+}
+
+.mini-player-close-btn:hover {
+  background: #ef4444;
+  /* Red on hover */
+  color: white;
+}
+
 
 /* Header & Menu Classes extracted from App.tsx inline styles */
 .header-row {

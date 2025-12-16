@@ -190,15 +190,33 @@ app.post('/api/summarize', async (req, res) => {
     if (!openaiApiKey) {
       return res.status(500).json({ error: 'OpenAI API key not configured' });
     }
-    // Request a longer summary (2048 tokens)
-    const prompt = `Write a detailed academic summary (aim for 2048 tokens, up to 12000 characters) for the following article. Include background, methods, results, and discussion in a single, comprehensive narrative.\n\nTitle: ${title}\nAuthors: ${authors?.join(', ')}\nJournal: ${journal}\nPublication Date: ${publication_date}`;
+    // Request a much longer, narrative-style summary (4096 tokens for ~15 min audio)
+    const prompt = `You are an expert science communicator creating an engaging audio summary of a research paper. Your goal is to tell the story of this research in a natural, flowing narrative that would be compelling to listen to.
+
+Write a comprehensive summary (aim for 4096 tokens, approximately 3000-4000 words) that weaves together the background, methods, results, and discussion into a cohesive narrative. Instead of breaking these into separate sections, flow naturally between them as you would when telling an exciting story about a scientific discovery.
+
+Focus on:
+- The journey of discovery: What question drove this research? Why does it matter?
+- The narrative arc: How did the researchers approach the problem? What did they find?
+- The human element: What makes this research compelling or surprising?
+- The broader context: How does this fit into the bigger scientific picture?
+
+Maintain scientific accuracy while making it engaging and accessible. Use transitions that feel natural in spoken form.
+
+Article Details:
+Title: ${title}
+Authors: ${authors?.join(', ')}
+Journal: ${journal}
+Publication Date: ${publication_date}
+Abstract: ${abstract}`;
+
     const response = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: 'gpt-4o',
       messages: [
-        { role: 'system', content: 'You are an expert academic summarizer.' },
+        { role: 'system', content: 'You are an expert science communicator who creates engaging, narrative-driven summaries of research papers for audio consumption.' },
         { role: 'user', content: prompt }
       ],
-      max_tokens: 2048
+      max_tokens: 8192
     }, {
       headers: {
         'Authorization': `Bearer ${openaiApiKey}`,
@@ -206,10 +224,10 @@ app.post('/api/summarize', async (req, res) => {
       }
     });
     let summary = response.data.choices?.[0]?.message?.content || '';
-    // Limit to 8000 characters for safety
-    if (summary.length > 12000) {
-      summary = summary.slice(0, 12000);
-    }
+    // Limit to 30000 characters for longer narrative summaries (~15 min audio)
+    // if (summary.length > 30000) {
+    //   summary = summary.slice(0, 30000);
+    // }
 
     // 2. Persist to Global Papers
     if (pmid) {
