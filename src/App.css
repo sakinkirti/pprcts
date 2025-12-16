@@ -1,0 +1,646 @@
+/* Modern, simple style for the app */
+body,
+html {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+}
+
+#root {
+  width: 100vw;
+  height: 100vh;
+  margin: 0;
+  padding: 0;
+  text-align: left;
+  background: var(--bg-primary);
+}
+
+.container {
+  min-height: 100vh;
+  width: 100vw;
+  max-width: none;
+  margin: 0;
+  padding: 32px 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  background: var(--bg-primary);
+  border-radius: 0;
+  box-shadow: none;
+  font-family: 'Inter', 'Segoe UI', Arial, sans-serif;
+}
+
+h1 {
+  font-size: 2rem;
+  font-weight: 600;
+  margin-bottom: 24px;
+  color: var(--text-primary);
+  font-style: italic;
+}
+
+.logo {
+  height: 6em;
+  padding: 1.5em;
+  will-change: filter;
+  transition: filter 300ms;
+}
+
+.logo:hover {
+  filter: drop-shadow(0 0 2em #646cffaa);
+}
+
+.logo.react:hover {
+  filter: drop-shadow(0 0 2em #61dafbaa);
+}
+
+@keyframes logo-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  a:nth-of-type(2) .logo {
+    animation: logo-spin infinite 20s linear;
+  }
+}
+
+.card {
+  padding: 2em;
+}
+
+.read-the-docs {
+  color: var(--text-secondary);
+}
+
+.search-form {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 24px;
+  width: 100%;
+  max-width: 700px;
+}
+
+.search-form input,
+.settings-input {
+  flex: 1;
+  padding: 12px 20px;
+  /* Added horizontal padding for pill shape */
+  font-size: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 24px;
+  /* Pill shape */
+  outline: none;
+  transition: border-color 0.2s;
+  background: var(--bg-card);
+  color: var(--text-primary);
+}
+
+.search-form input:focus,
+.settings-input:focus {
+  border-color: var(--accent);
+}
+
+.search-form button {
+  padding: 12px 28px;
+  font-size: 1rem;
+  background: var(--accent);
+  color: #fff;
+  /* Keep white text on accent button for contrast */
+  border: none;
+  border-radius: 24px;
+  /* Pill shape */
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.search-form button:disabled {
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  cursor: not-allowed;
+}
+
+.results-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  width: 100%;
+  max-width: 700px;
+}
+
+.result-item {
+  background: var(--bg-card);
+  border-radius: 16px;
+  /* More rounded card */
+  box-shadow: 0 2px 8px var(--shadow);
+  border: 1px solid var(--border);
+  /* Added specific border for dark mode definition */
+  margin: 16px 0;
+  padding: 24px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  position: relative;
+  transition: box-shadow 0.2s;
+}
+
+.result-item:hover {
+  box-shadow: 0 4px 16px var(--shadow);
+}
+
+.abstract-hover {
+  display: none;
+  position: absolute;
+  left: 24px;
+  top: 100%;
+  z-index: 10;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border-radius: 12px;
+  box-shadow: 0 2px 8px var(--shadow);
+  padding: 14px 18px;
+  font-size: 0.98rem;
+  width: 90%;
+  max-width: 600px;
+  margin-top: 8px;
+  border: 1px solid var(--border);
+}
+
+.result-item:hover .abstract-hover {
+  display: block;
+}
+
+.result-item a {
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 1.1rem;
+  font-weight: 500;
+}
+
+.result-item a:hover {
+  text-decoration: underline;
+}
+
+.result-item div {
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+  margin-top: 4px;
+}
+
+.result-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+}
+
+.result-main>div {
+  flex: 1;
+}
+
+.details-btn {
+  min-width: 130px;
+  margin-left: 16px;
+  padding: 8px 16px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 20px;
+  font-size: 0.98rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+  white-space: nowrap;
+  align-self: flex-start;
+}
+
+.details-btn:hover {
+  background: var(--accent-hover);
+}
+
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  /* Use simple semi-transparent black for overlay */
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal-content {
+  background: var(--bg-card);
+  border-radius: 24px;
+  /* Matches rounded look */
+  box-shadow: 0 4px 24px var(--shadow);
+  padding: 32px 32px 24px 32px;
+  max-width: 700px;
+  width: 95vw;
+  max-height: 80vh;
+  overflow-y: auto;
+  position: relative;
+  color: var(--text-primary);
+}
+
+.modal-close {
+  position: absolute;
+  top: 16px;
+  right: 18px;
+  background: none;
+  border: none;
+  font-size: 2rem;
+  color: var(--text-secondary);
+  cursor: pointer;
+}
+
+.modal-content h2 {
+  margin-top: 0;
+  font-size: 1.3rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  padding-right: 40px;
+  /* Fix 6: Space for close button */
+}
+
+.modal-content strong {
+  color: var(--text-primary);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: center;
+  margin: 20px 0;
+}
+
+.summary-text {
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  line-height: 1.6;
+}
+
+audio {
+  width: 100%;
+}
+
+.action-btn {
+  background-color: var(--accent);
+  color: white;
+  padding: 10px 24px;
+  border: none;
+  border-radius: 20px;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background-color 0.2s;
+}
+
+.action-btn:hover {
+  background-color: var(--accent-hover);
+}
+
+.summarize-btn {
+  /* Reuse action-btn styles or specific override */
+  background-color: var(--accent);
+  color: white;
+  padding: 10px 24px;
+  border: none;
+  border-radius: 20px;
+  font-size: 1rem;
+  cursor: pointer;
+}
+
+@media (max-width: 600px) {
+  .container {
+    padding: 12px;
+  }
+
+  h1 {
+    font-size: 1.3rem;
+  }
+
+  .search-form button,
+  .search-form input {
+    font-size: 0.95rem;
+    padding: 10px;
+  }
+}
+
+.home-container,
+.library-container,
+.settings-container {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+}
+
+/* Mini Player Styles */
+.mini-player {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  width: 360px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 16px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+  z-index: 1000;
+}
+
+.mini-player-title {
+  font-size: 0.9rem;
+  margin-bottom: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-weight: 500;
+}
+
+.mini-player-controls {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.mini-player-play-btn {
+  background: rgba(0, 0, 0, 0.1);
+  /* Light gray in light mode */
+  color: var(--text-primary);
+  border: none;
+  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  /* Prevent squishing */
+  min-height: 32px;
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s;
+  flex-shrink: 0;
+  padding: 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  .mini-player-play-btn {
+    background: rgba(255, 255, 255, 0.1);
+    /* Dark gray in dark mode */
+    color: white;
+  }
+}
+
+.mini-player-play-btn:hover {
+  background: #667eea;
+  /* Purple on hover */
+  color: white;
+}
+
+.mini-player-play-btn:active {
+  transform: scale(0.95);
+}
+
+.mini-player-progress-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mini-player-progress-bar {
+  height: 6px;
+  background: var(--bg-secondary);
+  border-radius: 3px;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+}
+
+.mini-player-progress-fill {
+  height: 100%;
+  background: #667eea;
+  /* Match play button hover color */
+  border-radius: 3px;
+  transition: width 0.1s linear;
+}
+
+.mini-player-time {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.mini-player-close-btn {
+  background: rgba(0, 0, 0, 0.1);
+  /* Light gray in light mode */
+  color: var(--text-primary);
+  border: none;
+  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+  /* Prevent squishing */
+  min-height: 32px;
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.2s, color 0.2s;
+  flex-shrink: 0;
+  padding: 0;
+}
+
+@media (prefers-color-scheme: dark) {
+  .mini-player-close-btn {
+    background: rgba(255, 255, 255, 0.1);
+    /* Dark gray in dark mode */
+    color: white;
+  }
+}
+
+.mini-player-close-btn:hover {
+  background: #ef4444;
+  /* Red on hover */
+  color: white;
+}
+
+
+/* Header & Menu Classes extracted from App.tsx inline styles */
+.header-row {
+  position: relative;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin-bottom: 20px;
+  max-width: 800px;
+  z-index: 2000;
+  /* Fix 1: Ensure menu loads on top of result items (z-index 10-ish) */
+}
+
+/* ... existing menu classes ... */
+
+.modal-content {
+  background: var(--bg-card);
+  border-radius: 24px;
+  box-shadow: 0 4px 24px var(--shadow);
+  padding: 32px 32px 24px 32px;
+  max-width: 700px;
+  width: 95vw;
+  max-height: 80vh;
+  overflow-y: auto;
+  position: relative;
+  color: var(--text-primary);
+  text-align: left;
+  /* Default alignment */
+}
+
+/* Fix 4: Center Summarize Button wrapper */
+.modal-actions {
+  display: flex;
+  justify-content: center;
+  margin-top: 20px;
+}
+
+/* Fix 3 & 5: Audio Width and Dark Mode Text */
+.modal-content audio {
+  width: 100%;
+  margin-top: 10px;
+  border-radius: 24px;
+  /* Optional: round the audio player if browser supports */
+}
+
+/* Fix 5: Ensure text is readable in dark mode */
+.summary-text,
+.modal-content div {
+  color: var(--text-primary);
+  line-height: 1.6;
+}
+
+/* Fix 6: Close button overlap */
+.modal-content h2 {
+  margin-top: 0;
+  font-size: 1.3rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  padding-right: 40px;
+  /* Space for close button */
+}
+
+.menu-container {
+  position: absolute;
+  right: 20px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.hamburger-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  font-size: 1rem;
+  cursor: pointer;
+  padding: 6px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.hamburger-btn:hover {
+  border-color: var(--accent);
+}
+
+.dropdown-menu {
+  position: absolute;
+  top: 120%;
+  right: 0;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  /* Rounded dropdown */
+  box-shadow: 0 4px 12px var(--shadow);
+  padding: 10px;
+  z-index: 1000;
+  min-width: 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  text-align: left;
+}
+
+.dropdown-link {
+  text-decoration: none;
+  color: var(--text-primary);
+  padding: 8px 12px;
+  border-radius: 12px;
+  /* Rounded hover states */
+}
+
+.dropdown-link:hover {
+  color: var(--accent);
+  background-color: var(--bg-secondary);
+  border-radius: 4px;
+}
+
+.menu-divider {
+  width: 100%;
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 5px 0;
+}
+
+.menu-email {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  padding: 0 12px;
+}
+
+.logout-btn {
+  background: var(--bg-secondary);
+  color: #ff4444;
+  border: 1px solid var(--border);
+  padding: 8px;
+  border-radius: 16px;
+  cursor: pointer;
+  margin-top: 5px;
+}
+
+.logout-btn:hover {
+  background: rgba(255, 68, 68, 0.1);
+}
+
+.login-btn {
+  background: var(--accent);
+  color: white;
+  border: none;
+  padding: 8px;
+  border-radius: 16px;
+  cursor: pointer;
+}
+
+.login-btn:hover {
+  background: var(--accent-hover);
+}
+
+.modal-content strong {
+  color: var(--text-primary);
+}
