@@ -6,6 +6,7 @@ import type { Session } from '@supabase/supabase-js'
 import Home from './Home'
 import Settings from './Settings'
 import Library from './Library' // Assuming Library component is needed based on routes
+import About from './About'
 import MiniPlayer from './MiniPlayer'
 
 interface GlobalAudio {
@@ -24,7 +25,8 @@ function AppContent() {
 
   const getPageTitle = () => {
     switch (location.pathname) {
-      case '/library': return 'My Library';
+      case '/library': return 'Library';
+      case '/about': return 'About';
       case '/settings': return 'Settings';
       case '/': return 'Home';
       default: return 'Shortcuts';
@@ -83,10 +85,11 @@ function AppContent() {
           {menuOpen && (
             <div className="dropdown-menu">
               <Link to="/" onClick={() => setMenuOpen(false)} className="dropdown-link">Home</Link>
+              <Link to="/about" onClick={() => setMenuOpen(false)} className="dropdown-link">About</Link>
 
               {session ? (
                 <>
-                  <Link to="/library" onClick={() => setMenuOpen(false)} className="dropdown-link">My Library</Link>
+                  <Link to="/library" onClick={() => setMenuOpen(false)} className="dropdown-link">Library</Link>
                   <Link to="/settings" onClick={() => setMenuOpen(false)} className="dropdown-link">Settings</Link>
                   <hr className="menu-divider" />
                   <div className="menu-email">{session.user.email}</div>
@@ -127,6 +130,7 @@ function AppContent() {
           if (audio) setIsPlaying(true);
         }} />} />
         <Route path="/settings" element={<Settings session={session} />} />
+        <Route path="/about" element={<About />} />
       </Routes>
 
       {globalAudio && (

@@ -1,6 +1,6 @@
 
 import { useState, useEffect } from 'react'
-import { supabase } from './supabaseClient'
+
 import type { Session } from '@supabase/supabase-js'
 
 interface LibraryProps {
@@ -10,8 +10,10 @@ interface LibraryProps {
 
 export default function Library({ session, setGlobalAudio }: LibraryProps) {
     const [papers, setPapers] = useState<any[]>([])
+    const [briefings, setBriefings] = useState<any[]>([])
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState('')
+    const [filter, setFilter] = useState<'All' | 'Articles' | 'Briefings'>('All')
 
     // Modal State shared with Home? 
     // For simplicity, duplicating modal logic slightly or we could extract a "PaperModal" component. 
@@ -25,6 +27,10 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
     const [audioLoading, setAudioLoading] = useState(false);
     const [audioError, setAudioError] = useState('');
 
+    // Briefing Modal State
+    const [selectedBriefing, setSelectedBriefing] = useState<any>(null);
+    const [showBriefingModal, setShowBriefingModal] = useState(false);
+
     useEffect(() => {
         if (session?.access_token) {
             fetchLibrary();
@@ -35,17 +41,25 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
         setLoading(true);
         setError('');
         try {
-            const res = await fetch('http://localhost:5001/api/library', {
-                headers: {
-                    'Authorization': `Bearer ${session?.access_token}`
-                }
-            });
-            if (res.status === 401) {
+            const headers = {
+                'Authorization': `Bearer ${session?.access_token}`
+            };
+
+            const [libRes, briefRes] = await Promise.all([
+                fetch('http://localhost:5001/api/library', { headers }),
+                fetch('http://localhost:5001/api/briefings/history', { headers })
+            ]);
+
+            if (libRes.status === 401 || briefRes.status === 401) {
                 setError('Please log in using the menu.');
                 return;
             }
-            const data = await res.json();
-            setPapers(data.library || []);
+
+            const libData = await libRes.json();
+            const briefData = await briefRes.json();
+
+            setPapers(libData.library || []);
+            setBriefings(briefData.briefings || []);
         } catch (err) {
             setError('Failed to load library.');
         } finally {
@@ -163,32 +177,114 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
 
             {loading && <p>Loading library...</p>}
             {error && <p style={{ color: 'red' }}>{error}</p>}
-            {!loading && papers.length === 0 && (
+
+            {!loading && (
+                <div className="filter-bubbles">
+                    <button
+                        className={`filter-bubble ${filter === 'All' ? 'active' : ''}`}
+                        onClick={() => setFilter('All')}
+                    >All</button>
+                    <button
+                        className={`filter-bubble ${filter === 'Articles' ? 'active' : ''}`}
+                        onClick={() => setFilter('Articles')}
+                    >Articles</button>
+                    <button
+                        className={`filter-bubble ${filter === 'Briefings' ? 'active' : ''}`}
+                        onClick={() => setFilter('Briefings')}
+                    >Briefings</button>
+                </div>
+            )}
+
+            {!loading && papers.length === 0 && briefings.length === 0 && (
                 <div style={{ textAlign: 'center', color: 'var(--text-secondary)', marginTop: '40px' }}>
-                    <p>No saved papers yet.</p>
+                    <p>No saved papers or briefings yet.</p>
                 </div>
             )}
 
             <ul className="results-list">
-                {papers.map((paper, idx) => (
-                    <li key={idx} className="result-item">
-                        <a
-                            href="#"
-                            onClick={e => {
-                                e.preventDefault();
-                                openPaperModal(paper);
-                            }}
-                        >
-                            {paper.title}
-                        </a>
-                        <div className="card-meta">
-                            <div><strong>Authors:</strong> {paper.authors && paper.authors.length > 0 ? paper.authors.join(', ') : 'No authors listed'}</div>
-                            <div><strong>Journal:</strong> {paper.journal || 'No journal listed'}</div>
-                            <div><strong>Publication Date:</strong> {paper.publication_date || 'No date listed'}</div>
-                        </div>
-                        {/* Reuse card styles from Home */}
-                    </li>
-                ))}
+                {/* 
+                  Merge and Sort Logic:
+                  - Papers have 'saved_at'
+                  - Briefings have 'date'
+                  - We want to mix them and sort by date descending.
+                */}
+                {(() => {
+                    let items: any[] = [];
+                    if (filter === 'All' || filter === 'Articles') {
+                        items = items.concat(papers.map(p => ({ ...p, type: 'paper', sortDate: p.saved_at })));
+                    }
+                    if (filter === 'All' || filter === 'Briefings') {
+                        items = items.concat(briefings.map(b => ({ ...b, type: 'briefing', sortDate: b.date })));
+                    }
+
+                    items.sort((a, b) => new Date(b.sortDate).getTime() - new Date(a.sortDate).getTime());
+
+                    return items.map((item, idx) => {
+                        if (item.type === 'briefing') {
+                            return (
+                                <li key={`briefing-${idx}`} className="briefing-card" onClick={() => {
+                                    setSelectedBriefing(item);
+                                    setShowBriefingModal(true);
+                                }}>
+                                    <div className="briefing-rainbow-bg"></div>
+                                    <div className="briefing-card-content">
+                                        <div style={{ paddingRight: '50px' }}>
+                                            <div className="briefing-title">
+                                                {item.title}
+                                            </div>
+                                            <div className="briefing-meta" style={{ marginTop: '4px' }}>
+                                                {new Date(item.date).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}
+                                            </div>
+                                            {item.summary && (
+                                                <p style={{
+                                                    fontSize: '0.9rem',
+                                                    color: 'var(--text-primary)',
+                                                    margin: '8px 0 0 0',
+                                                    lineHeight: '1.5',
+                                                    opacity: 0.9
+                                                }}>
+                                                    {item.summary}
+                                                </p>
+                                            )}
+                                        </div>
+                                        <button
+                                            className="briefing-play-btn"
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                // need to handle playing
+                                                setGlobalAudio({
+                                                    url: item.audio_url,
+                                                    title: item.title
+                                                });
+                                            }}
+                                        >
+                                            ▶
+                                        </button>
+                                    </div>
+                                </li>
+                            );
+                        } else {
+                            return (
+                                <li key={`paper-${idx}`} className="result-item">
+                                    <a
+                                        href="#"
+                                        onClick={e => {
+                                            e.preventDefault();
+                                            openPaperModal(item);
+                                        }}
+                                    >
+                                        {item.title}
+                                    </a>
+                                    <div className="card-meta">
+                                        <div><strong>Authors:</strong> {item.authors && item.authors.length > 0 ? item.authors.join(', ') : 'No authors listed'}</div>
+                                        <div><strong>Journal:</strong> {item.journal || 'No journal listed'}</div>
+                                        <div><strong>Publication Date:</strong> {item.publication_date || 'No date listed'}</div>
+                                    </div>
+                                </li>
+                            );
+                        }
+                    });
+                })()}
             </ul>
 
             {/* Modal - Duplicate code for now */}
@@ -244,6 +340,82 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
                     </div>
                 </div>
             )}
+
+
+            {/* Briefing Modal */}
+            {
+                showBriefingModal && selectedBriefing && (
+                    <div className="modal-overlay" onClick={() => setShowBriefingModal(false)} style={{
+                        position: 'fixed',
+                        top: 0,
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        background: 'rgba(0,0,0,0.5)',
+                        zIndex: 1000,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        padding: '20px'
+                    }}>
+                        <div className="modal-content" onClick={e => e.stopPropagation()} style={{
+                            background: 'var(--bg-card)',
+                            borderRadius: '24px',
+                            padding: '30px',
+                            maxWidth: '600px',
+                            width: '100%',
+                            maxHeight: '85vh',
+                            overflowY: 'auto',
+                            position: 'relative'
+                        }}>
+                            <button
+                                onClick={() => setShowBriefingModal(false)}
+                                style={{
+                                    position: 'absolute',
+                                    top: '20px',
+                                    right: '20px',
+                                    background: 'transparent',
+                                    border: 'none',
+                                    fontSize: '1.5rem',
+                                    cursor: 'pointer',
+                                    color: 'var(--text-secondary)'
+                                }}
+                            >&times;</button>
+
+                            <h2 style={{ marginTop: 0, marginBottom: '20px', fontSize: '1.5rem' }}>Daily Briefing Papers</h2>
+                            <p style={{ color: 'var(--text-secondary)', marginBottom: '24px' }}>
+                                The following papers were discussed in your daily briefing for {new Date(selectedBriefing.date).toLocaleDateString()}.
+                            </p>
+
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
+                                {selectedBriefing.papers_metadata && selectedBriefing.papers_metadata.map((paper: any, idx: number) => (
+                                    <div key={idx} style={{ paddingBottom: '16px', borderBottom: idx < selectedBriefing.papers_metadata.length - 1 ? '1px solid var(--border)' : 'none' }}>
+                                        <h3 style={{ fontSize: '1.1rem', marginBottom: '8px', color: 'var(--text-primary)' }}>{paper.title}</h3>
+                                        <div style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>
+                                            {paper.authors?.slice(0, 3).join(', ')}{paper.authors?.length > 3 ? ' et al.' : ''} • {paper.journal}
+                                        </div>
+                                        <p style={{ fontSize: '0.9rem', lineHeight: '1.5', margin: 0, opacity: 0.9 }}>
+                                            {paper.abstract?.slice(0, 200)}...
+                                        </p>
+                                    </div>
+                                ))}
+                                {!selectedBriefing.papers_metadata && (
+                                    <p>Paper details not available for this episode.</p>
+                                )}
+                            </div>
+
+                            {selectedBriefing.transcript && (
+                                <details style={{ marginTop: '24px' }}>
+                                    <summary style={{ cursor: 'pointer', color: 'var(--accent)', fontWeight: 500 }}>View Full Transcript</summary>
+                                    <p style={{ marginTop: '12px', whiteSpace: 'pre-wrap', fontSize: '0.95rem', lineHeight: '1.6', color: 'var(--text-primary)' }}>
+                                        {selectedBriefing.transcript}
+                                    </p>
+                                </details>
+                            )}
+                        </div>
+                    </div>
+                )
+            }
         </div>
     )
 }

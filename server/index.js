@@ -406,6 +406,49 @@ app.post('/api/tts', async (req, res) => {
   }
 });
 
+// Endpoint to fetch user's briefing history
+app.get('/api/briefings/history', async (req, res) => {
+  if (!req.user) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    const { data: briefings, error } = await req.supabase
+      .from('daily_podcasts')
+      .select('*')
+      .eq('user_id', req.user.id)
+      .order('date', { ascending: false });
+
+    if (error) {
+      throw error;
+    }
+
+    // Generate signed URLs for all audio paths
+    // Note: Creating many signed URLs in a loop might be slow if list is huge, 
+    // but for personal history it's fine for now. 
+    // Optimization: Create signed URLs only when playing? 
+    // For now, let's just send the data. The frontend might need to request a specific URL when playing 
+    // OR we generate them here if the token lifespan is long enough. 
+    // Let's generate them here for simplicity as we do in single-fetch.
+
+    const briefingsWithUrls = await Promise.all(briefings.map(async (b) => {
+      let audio_url = null;
+      if (b.audio_path) {
+        const { data } = await req.supabase.storage
+          .from('daily-podcasts')
+          .createSignedUrl(b.audio_path, 3600 * 24); // 24 hours
+        audio_url = data?.signedUrl;
+      }
+      return { ...b, audio_url };
+    }));
+
+    res.json({ briefings: briefingsWithUrls });
+  } catch (error) {
+    console.error('Briefing History Error:', error.message);
+    res.status(500).json({ error: 'Failed to fetch briefing history' });
+  }
+});
+
 
 // Endpoint to get or generate the Daily Podcast
 app.get('/api/daily-podcast', async (req, res) => {
@@ -466,7 +509,7 @@ app.get('/api/daily-podcast', async (req, res) => {
       model: 'gpt-4o',
       messages: [
         { role: 'system', content: 'You are a research assistant. Generate 3 specific, compound search terms for PubMed based on the user\'s recent paper titles. The terms should be related but distinct from the exact titles to find new, adjacent research. Return ONLY the 3 terms separated by OR.' },
-        { role: 'user', content: `User's recent papers:\n${interests || 'General Neuroscience, Cognitive Psychology'}` } // Fallback if empty
+        { role: 'user', content: `User's recent papers:\n${interests || 'Trending Today'}` } // Fallback if empty
       ],
       temperature: 0.9 // High temp for variety
     }, { headers: { 'Authorization': `Bearer ${openaiApiKey}` } });

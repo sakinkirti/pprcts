@@ -2,7 +2,7 @@
 import { useState, useEffect } from 'react'
 import { supabase } from './supabaseClient'
 import type { Session } from '@supabase/supabase-js'
-import DailyPodcast from './DailyPodcast';
+import DailyPodcast from './DailyPodcast.tsx';
 
 interface HomeProps {
     session: Session | null;
@@ -244,14 +244,16 @@ export default function Home({ session, authLoading, setGlobalAudio, globalAudio
             {loading && <p>Loading...</p>}
             {error && <p style={{ color: 'red' }}>{error}</p>}
 
-            {/* Daily Podcast Feature */}
-            <DailyPodcast
-                session={session}
-                setGlobalAudio={setGlobalAudio}
-                globalAudio={globalAudio}
-                isPlaying={isPlaying}
-                onPlayPause={setIsPlaying}
-            />
+            {/* Daily Podcast Feature - Hide when searching/results exist */}
+            {results.length === 0 && (
+                <DailyPodcast
+                    session={session}
+                    setGlobalAudio={setGlobalAudio}
+                    globalAudio={globalAudio}
+                    isPlaying={isPlaying}
+                    onPlayPause={setIsPlaying}
+                />
+            )}
 
             {/* Recommendations Header */}
             {!loading && !query && results.length === 0 && (
