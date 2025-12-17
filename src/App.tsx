@@ -17,6 +17,7 @@ function AppContent() {
   const [session, setSession] = useState<Session | null>(null)
   const [authLoading, setAuthLoading] = useState(true) // Start loading
   const [globalAudio, setGlobalAudio] = useState<GlobalAudio | null>(null)
+  const [isPlaying, setIsPlaying] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const navigate = useNavigate();
   const location = useLocation();
@@ -67,7 +68,7 @@ function AppContent() {
     <div className="container">
       {/* Header with Hamburger */}
       <header className="header-row">
-        <h1 style={{ margin: 0 }}>papercuts ✂️</h1>
+        <h1 style={{ margin: 0 }}>pprcts ✂️</h1>
 
         <div className="menu-container">
           <button
@@ -110,8 +111,21 @@ function AppContent() {
       </header>
 
       <Routes>
-        <Route path="/" element={<Home session={session} authLoading={authLoading} setGlobalAudio={setGlobalAudio} />} />
-        <Route path="/library" element={<Library session={session} setGlobalAudio={setGlobalAudio} />} />
+        <Route path="/" element={<Home
+          session={session}
+          authLoading={authLoading}
+          setGlobalAudio={(audio) => {
+            setGlobalAudio(audio);
+            if (audio) setIsPlaying(true);
+          }}
+          globalAudio={globalAudio}
+          isPlaying={isPlaying}
+          setIsPlaying={setIsPlaying}
+        />} />
+        <Route path="/library" element={<Library session={session} setGlobalAudio={(audio) => {
+          setGlobalAudio(audio);
+          if (audio) setIsPlaying(true);
+        }} />} />
         <Route path="/settings" element={<Settings session={session} />} />
       </Routes>
 
@@ -119,7 +133,12 @@ function AppContent() {
         <MiniPlayer
           audioUrl={globalAudio.url}
           title={globalAudio.title}
-          onClose={() => setGlobalAudio(null)}
+          isPlaying={isPlaying}
+          onPlayPause={setIsPlaying}
+          onClose={() => {
+            setGlobalAudio(null);
+            setIsPlaying(false);
+          }}
         />
       )}
     </div>

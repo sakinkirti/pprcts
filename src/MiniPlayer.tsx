@@ -3,20 +3,26 @@ import { useRef, useEffect, useState } from 'react'
 interface MiniPlayerProps {
     audioUrl: string;
     title: string;
+    isPlaying: boolean;
+    onPlayPause: (playing: boolean) => void;
     onClose: () => void;
 }
 
-export default function MiniPlayer({ audioUrl, title, onClose }: MiniPlayerProps) {
+export default function MiniPlayer({ audioUrl, title, isPlaying, onPlayPause, onClose }: MiniPlayerProps) {
     const audioRef = useRef<HTMLAudioElement>(null);
-    const [isPlaying, setIsPlaying] = useState(true);
+    // const [isPlaying, setIsPlaying] = useState(true); // Lifted to App
     const [currentTime, setCurrentTime] = useState(0);
     const [duration, setDuration] = useState(0);
 
     useEffect(() => {
         if (audioRef.current) {
-            audioRef.current.play();
+            if (isPlaying) {
+                audioRef.current.play().catch(e => console.error("Play failed:", e));
+            } else {
+                audioRef.current.pause();
+            }
         }
-    }, [audioUrl]);
+    }, [isPlaying, audioUrl]); // Sync audio play state with prop
 
     useEffect(() => {
         const audio = audioRef.current;
@@ -24,31 +30,32 @@ export default function MiniPlayer({ audioUrl, title, onClose }: MiniPlayerProps
 
         const updateTime = () => setCurrentTime(audio.currentTime);
         const updateDuration = () => setDuration(audio.duration);
-        const handlePlay = () => setIsPlaying(true);
-        const handlePause = () => setIsPlaying(false);
+        // const handlePlay = () => setIsPlaying(true); // Handled by prop
+        // const handlePause = () => setIsPlaying(false); // Handled by prop
+
+        // Listen to external pause events (like keyboard media keys) to sync back up?
+        const handleExternalPause = () => {
+            if (isPlaying) onPlayPause(false);
+        };
+        const handleExternalPlay = () => {
+            if (!isPlaying) onPlayPause(true);
+        }
 
         audio.addEventListener('timeupdate', updateTime);
         audio.addEventListener('loadedmetadata', updateDuration);
-        audio.addEventListener('play', handlePlay);
-        audio.addEventListener('pause', handlePause);
+        audio.addEventListener('play', handleExternalPlay);
+        audio.addEventListener('pause', handleExternalPause);
 
         return () => {
             audio.removeEventListener('timeupdate', updateTime);
             audio.removeEventListener('loadedmetadata', updateDuration);
-            audio.removeEventListener('play', handlePlay);
-            audio.removeEventListener('pause', handlePause);
+            audio.removeEventListener('play', handleExternalPlay);
+            audio.removeEventListener('pause', handleExternalPause);
         };
-    }, []);
+    }, [isPlaying, onPlayPause]); // Re-bind if prop handlers change
 
     const togglePlayPause = () => {
-        if (audioRef.current) {
-            if (isPlaying) {
-                audioRef.current.pause();
-            } else {
-                audioRef.current.play();
-            }
-            setIsPlaying(!isPlaying);
-        }
+        onPlayPause(!isPlaying);
     };
 
     const handleAudioEnd = () => {

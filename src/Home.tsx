@@ -2,14 +2,18 @@
 import { useState, useEffect } from 'react'
 import { supabase } from './supabaseClient'
 import type { Session } from '@supabase/supabase-js'
+import DailyPodcast from './DailyPodcast';
 
 interface HomeProps {
     session: Session | null;
     authLoading: boolean;
     setGlobalAudio: (audio: { url: string; title: string } | null) => void;
+    globalAudio: { url: string; title: string } | null;
+    isPlaying: boolean;
+    setIsPlaying: (playing: boolean) => void;
 }
 
-export default function Home({ session, authLoading, setGlobalAudio }: HomeProps) {
+export default function Home({ session, authLoading, setGlobalAudio, globalAudio, isPlaying, setIsPlaying }: HomeProps) {
     const [query, setQuery] = useState('')
     const [results, setResults] = useState<any[]>([])
     const [loading, setLoading] = useState(false)
@@ -140,6 +144,20 @@ export default function Home({ session, authLoading, setGlobalAudio }: HomeProps
                 })
             })
             const data = await res.json()
+
+            if (!res.ok) {
+                if (res.status === 401) {
+                    setModalError('Please sign in to generate summaries.');
+                } else if (res.status === 402) {
+                    setModalError('OpenAI account has run out of credits.');
+                } else if (res.status === 400 && data.error === 'OpenAI API key not configured') {
+                    setModalError('Please configure your OpenAI API Key in Settings.');
+                } else {
+                    setModalError(data.error || 'Failed to generate summary.');
+                }
+                return;
+            }
+
             if (data.summary) {
                 setSummary(data.summary)
             } else {
@@ -225,6 +243,15 @@ export default function Home({ session, authLoading, setGlobalAudio }: HomeProps
             </form>
             {loading && <p>Loading...</p>}
             {error && <p style={{ color: 'red' }}>{error}</p>}
+
+            {/* Daily Podcast Feature */}
+            <DailyPodcast
+                session={session}
+                setGlobalAudio={setGlobalAudio}
+                globalAudio={globalAudio}
+                isPlaying={isPlaying}
+                onPlayPause={setIsPlaying}
+            />
 
             {/* Recommendations Header */}
             {!loading && !query && results.length === 0 && (

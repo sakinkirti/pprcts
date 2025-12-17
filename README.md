@@ -33,7 +33,7 @@ Pull requests are welcome. For major changes, please open an issue first to disc
 [MIT](LICENSE)
 
 ## Quickstart
-```
+```sh
 nvm use 24.6.0 && node -v && npm -v && npm run dev
 cd server && nvm use 24.6.0 && npm start
 ```

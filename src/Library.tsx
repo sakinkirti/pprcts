@@ -98,6 +98,20 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
                 })
             })
             const data = await res.json()
+
+            if (!res.ok) {
+                if (res.status === 401) {
+                    setModalError('Please sign in to generate summaries.');
+                } else if (res.status === 402) {
+                    setModalError('OpenAI account has run out of credits.');
+                } else if (res.status === 400 && data.error === 'OpenAI API key not configured') {
+                    setModalError('Please configure your OpenAI API Key in Settings.');
+                } else {
+                    setModalError(data.error || 'Failed to generate summary.');
+                }
+                return;
+            }
+
             if (data.summary) {
                 setSummary(data.summary)
             } else {
