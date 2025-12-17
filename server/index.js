@@ -13,7 +13,12 @@ if (!global.File) {
 const axios = require('axios');
 const cors = require('cors');
 const cheerio = require('cheerio');
+const Bottleneck = require('bottleneck');
 const { createClient } = require('@supabase/supabase-js');
+
+const limiter = new Bottleneck({
+  minTime: 334 // ~3 requests per second to stay within NCBI limits without API key
+});
 
 require('dotenv').config();
 
@@ -89,7 +94,7 @@ app.get('/api/library', async (req, res) => {
 const fetchPubMedResults = async (query, retmax = 20) => {
   try {
     const esearchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=${encodeURIComponent(query)}&retmax=${retmax}&retmode=json`;
-    const esearchRes = await axios.get(esearchUrl);
+    const esearchRes = await limiter.schedule(() => axios.get(esearchUrl));
     const idList = esearchRes.data.esearchresult.idlist;
 
     if (!idList || idList.length === 0) {
@@ -97,7 +102,7 @@ const fetchPubMedResults = async (query, retmax = 20) => {
     }
 
     const efetchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id=${idList.join(',')}&retmode=xml`;
-    const efetchRes = await axios.get(efetchUrl);
+    const efetchRes = await limiter.schedule(() => axios.get(efetchUrl));
     const xml = efetchRes.data;
     const cheerioXml = cheerio.load(xml, { xmlMode: true });
     const articles = cheerioXml('PubmedArticle');
@@ -494,30 +499,66 @@ const generateDailyPodcast = async (userId, supabaseClient) => {
   console.log('[Daily Podcast] Query:', fullQuery);
 
   // 4. Search PubMed
-  const papers = await fetchPubMedResults(fullQuery, 5);
+  const papers = await fetchPubMedResults(fullQuery, 5); // Fetch top 5 papers
 
   if (papers.length === 0) {
     throw new Error('No new papers found for daily podcast today.');
   }
 
-  // 5. Generate Podcast Script & Title
   const papersText = papers.map((p, i) => `Paper ${i + 1}: ${p.title} by ${p.authors.slice(0, 2).join(', ')}. Abstract: ${p.abstract}`).join('\n\n');
 
-  const scriptRes = await axios.post('https://api.openai.com/v1/chat/completions', {
+  // --- HIERARCHICAL GENERATION START ---
+
+  // 5a. Step 1: Generate Outline
+  console.log('[Daily Podcast] Generating Outline...');
+  const outlineRes = await axios.post('https://api.openai.com/v1/chat/completions', {
     model: 'gpt-4o',
     messages: [
-      { role: 'system', content: 'You are a charismatic podcast host. Write a script for a 10-minute daily research update. Connect the papers into a narrative flow. Discuss agreements, disagreements, or thematic links. Keep it engaging, accessible but scientific. Do not use headers or "Host:" labels, just the spoken text.\n\nIMPORTANT: Return your response as a valid JSON object with three fields:\n1. "title": A short, catchy, 3-6 word title for this episode based on the topics discussed.\n2. "summary": A 1-3 sentence summary of the briefing to help the user decide if they should listen.\n3. "script": The full spoken script text.' },
-      { role: 'user', content: `Here are the top 5 papers for today:\n${papersText}` }
+      {
+        role: 'system',
+        content: 'You are an expert science communicator and podcast producer. Create a detailed outline for a 15-minute daily research briefing. The episode should flow naturally like a story. Structure it into 5-7 distinct sections (e.g., Intro, Deep Dive 1, Deep Dive 2, Synthesis/Connections, Outro). \n\nReturn valid JSON with:\n1. "title": Catchy episode title.\n2. "summary": 1-3 sentence summary.\n3. "sections": Array of objects { "id": number, "topic": string, "key_points": string[] }.'
+      },
+      { role: 'user', content: `Here are the papers to cover:\n${papersText}` }
     ],
     response_format: { type: "json_object" }
   }, { headers: { 'Authorization': `Bearer ${openaiApiKey}` } });
 
-  const content = JSON.parse(scriptRes.data.choices[0].message.content);
-  const transcript = content.script;
-  const episodeTitle = content.title || `Daily Research Update: ${today}`;
-  const episodeSummary = content.summary;
+  const outlineData = JSON.parse(outlineRes.data.choices[0].message.content);
+  console.log('[Daily Podcast] Outline:', outlineData.title);
+
+  // 5b. Step 2: Generate Script Section by Section
+  let fullScript = "";
+  let previousContext = "This is the start of the episode.";
+
+  for (const section of outlineData.sections) {
+    console.log(`[Daily Podcast] Generating Section ${section.id}: ${section.topic}`);
+    const sectionRes = await axios.post('https://api.openai.com/v1/chat/completions', {
+      model: 'gpt-4o',
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a charismatic podcast host. Write the spoken script for ONE section of a 15-minute daily research update. Write ONLY the spoken text (no "Host:" labels, no sound effects). Keep it engaging, scientific but accessible. Ensure a smooth transition from the previous section.'
+        },
+        {
+          role: 'user',
+          content: `Current Section: ${section.topic}\nKey Points to Cover: ${section.key_points.join(', ')}\n\nContext/Previous Section Ended With: "...${previousContext.slice(-300)}"\n\nFull Paper Context:\n${papersText}\n\nReturn the 500 word script for this section.`
+        }
+      ]
+    }, { headers: { 'Authorization': `Bearer ${openaiApiKey}` } });
+
+    const sectionText = sectionRes.data.choices[0].message.content;
+    fullScript += sectionText + "\n\n";
+    previousContext = sectionText; // Update context for next iteration
+  }
+
+  // --- HIERARCHICAL GENERATION END ---
+
+  const episodeTitle = outlineData.title || `Daily Research Update: ${today}`;
+  const episodeSummary = outlineData.summary;
+  const transcript = fullScript;
 
   // 6. Generate Audio (TTS)
+  // Note: Transcript is now much longer (~2500 words), so chunking is critical.
   const chunkSize = 4096;
   const chunks = [];
   for (let i = 0; i < transcript.length; i += chunkSize) {
@@ -525,6 +566,8 @@ const generateDailyPodcast = async (userId, supabaseClient) => {
   }
 
   const audioBuffers = [];
+  console.log(`[Daily Podcast] Generating Audio (${chunks.length} chunks)...`);
+
   for (const chunk of chunks) {
     const ttsRes = await axios.post('https://api.openai.com/v1/audio/speech', {
       model: 'tts-1',
