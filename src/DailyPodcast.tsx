@@ -32,6 +32,11 @@ export default function DailyPodcast({ session, setGlobalAudio, globalAudio, isP
                 });
 
                 if (res.status === 404) {
+                    const data = await res.json().catch(() => ({}));
+                    if (data.code === 'not_generated') {
+                        setError(''); // Clear any previous errors
+                        setPodcast(null);
+                    }
                     setLoading(false);
                     return;
                 }
@@ -53,13 +58,45 @@ export default function DailyPodcast({ session, setGlobalAudio, globalAudio, isP
 
         const timer = setTimeout(() => {
             fetchDailyPodcast();
-        }, 2500);
+        }, 1000); // Reduced delay for better UX
 
         return () => clearTimeout(timer);
     }, [session]);
 
+    const handleGenerate = async (e: React.MouseEvent) => {
+        e.stopPropagation();
+        if (!session) return;
+        setLoading(true);
+        setError('');
+
+        try {
+            const res = await fetch('http://localhost:5001/api/daily-podcast/generate', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${session.access_token}`
+                }
+            });
+
+            if (!res.ok) {
+                const errorData = await res.json();
+                throw new Error(errorData.error || 'Generation failed');
+            }
+
+            const data = await res.json();
+            setPodcast(data);
+        } catch (err: any) {
+            console.error('Generation error:', err);
+            setError(err.message || 'Failed to generate briefing.');
+        } finally {
+            setLoading(false);
+        }
+    };
+
     if (!session) return null;
-    if (!loading && !podcast && !error) return null;
+
+    // If not loaded yet, show nothing or skeleton?
+    // If not generated (podcast is null and not loading), show Generate Card
+
 
     return (
         <>
@@ -98,7 +135,8 @@ export default function DailyPodcast({ session, setGlobalAudio, globalAudio, isP
                     background: 'linear-gradient(45deg, #ff0000, #ff7300, #fffb00, #48ff00, #00ffd5, #002bff, #7a00ff, #ff00c8, #ff0000)',
                     backgroundSize: '400% 400%',
                     animation: 'rainbow-border 10s ease infinite',
-                    zIndex: 0
+                    zIndex: 0,
+                    opacity: podcast ? 1 : 0.5 // Dim border if not generated
                 }} />
 
                 <div style={{
@@ -113,8 +151,8 @@ export default function DailyPodcast({ session, setGlobalAudio, globalAudio, isP
                 }}>
                     {loading ? (
                         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', color: 'var(--text-secondary)' }}>
-                            <div className="loading-spinner" style={{ width: '16px', height: '16px' }}></div>
-                            <span style={{ fontSize: '0.9rem' }}>Curating your daily briefing...</span>
+                            <div className="loading-spinner" style={{ width: '16px', height: '16px', border: '2px solid var(--text-secondary)', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></div>
+                            <span style={{ fontSize: '0.9rem' }}>{podcast ? 'Curating your daily briefing...' : 'Generating your daily briefing...'}</span>
                         </div>
                     ) : error ? (
                         <div style={{ color: 'red', fontSize: '0.9rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -136,7 +174,43 @@ export default function DailyPodcast({ session, setGlobalAudio, globalAudio, isP
                                 Retry
                             </button>
                         </div>
+                    ) : !podcast ? (
+                        /* Generate State */
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                            <div>
+                                <h2 style={{
+                                    fontSize: '1.1rem',
+                                    fontWeight: 600,
+                                    margin: '0 0 4px 0',
+                                    background: 'linear-gradient(90deg, #ff00c8, #7a00ff)',
+                                    WebkitBackgroundClip: 'text',
+                                    WebkitTextFillColor: 'transparent',
+                                }}>
+                                    Daily Briefing
+                                </h2>
+                                <p style={{ margin: 0, fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
+                                    Your personalized research update is ready to be generated.
+                                </p>
+                            </div>
+                            <button
+                                onClick={handleGenerate}
+                                style={{
+                                    background: 'var(--accent)',
+                                    color: 'white',
+                                    border: 'none',
+                                    padding: '8px 16px',
+                                    borderRadius: '20px',
+                                    cursor: 'pointer',
+                                    fontSize: '0.9rem',
+                                    fontWeight: 500,
+                                    transition: 'background 0.2s'
+                                }}
+                            >
+                                Generate
+                            </button>
+                        </div>
                     ) : (
+                        /* Podcast Exists State */
                         <>
                             <div style={{ paddingRight: '50px' }}>
                                 <div style={{ display: 'flex', alignItems: 'baseline', gap: '6px', flexWrap: 'wrap' }}>
@@ -214,6 +288,14 @@ export default function DailyPodcast({ session, setGlobalAudio, globalAudio, isP
                     )}
                 </div>
             </div>
+
+            {/* Spinner CSS */}
+            <style>{`
+                @keyframes spin {
+                    0% { transform: rotate(0deg); }
+                    100% { transform: rotate(360deg); }
+                }
+            `}</style>
 
             {/* Papers Modal */}
             {showModal && podcast && (

@@ -9,6 +9,7 @@ interface SettingsProps {
 export default function Settings({ session }: SettingsProps) {
     const [keywordTags, setKeywordTags] = useState<string[]>([])
     const [keywordInput, setKeywordInput] = useState('')
+    const [briefingEnabled, setBriefingEnabled] = useState(false)
     const [openaiKey, setOpenaiKey] = useState('')
     const [hasExistingKey, setHasExistingKey] = useState(false)
     const [loading, setLoading] = useState(false)
@@ -23,7 +24,7 @@ export default function Settings({ session }: SettingsProps) {
             try {
                 const { data, error } = await supabase
                     .from('user_settings')
-                    .select('keywords, openai_key')
+                    .select('keywords, openai_key, briefing_enabled')
                     .eq('user_id', session.user.id)
                     .single()
 
@@ -35,6 +36,7 @@ export default function Settings({ session }: SettingsProps) {
                     // Parse comma-separated keywords into array
                     const tags = data.keywords ? data.keywords.split(',').map((k: string) => k.trim()).filter((k: string) => k) : []
                     setKeywordTags(tags)
+                    setBriefingEnabled(data.briefing_enabled || false)
                     // Don't load the actual key, just track if it exists
                     if (data.openai_key) {
                         setHasExistingKey(true)
@@ -67,9 +69,9 @@ export default function Settings({ session }: SettingsProps) {
         setKeywordTags(keywordTags.filter(tag => tag !== tagToRemove))
     }
 
-    // Auto-save keywords whenever they change
+    // Auto-save keywords and briefing preference whenever they change
     useEffect(() => {
-        const saveKeywords = async () => {
+        const saveSettings = async () => {
             if (!session || isInitialLoad.current) return;
 
             try {
@@ -78,15 +80,16 @@ export default function Settings({ session }: SettingsProps) {
                     .upsert({
                         user_id: session.user.id,
                         keywords: keywordTags.join(', '),
+                        briefing_enabled: briefingEnabled,
                         updated_at: new Date().toISOString()
                     })
             } catch (err: any) {
-                console.error('Failed to auto-save keywords:', err)
+                console.error('Failed to auto-save settings:', err)
             }
         }
 
-        saveKeywords()
-    }, [keywordTags, session])
+        saveSettings()
+    }, [keywordTags, briefingEnabled, session])
 
     const handleResetKey = () => {
         setHasExistingKey(false)
@@ -138,43 +141,44 @@ export default function Settings({ session }: SettingsProps) {
     }
 
     return (
-        <div className="settings-container">
+        <div className="settings-container" style={{ maxWidth: '700px', margin: '0 auto' }}>
 
-            <div className="card" style={{ padding: '30px', width: '100%', maxWidth: '700px' }}>
-                <h2 style={{ fontSize: '1.2rem', marginBottom: '15px', color: 'var(--text-primary)' }}>Recommendation Preferences</h2>
-                <p style={{ color: 'var(--text-secondary)', marginBottom: '20px', lineHeight: '1.5' }}>
+            {/* Tile 1: Recommendations */}
+            <div className="result-item" style={{ marginBottom: '4px', padding: '24px', width: '100%', boxSizing: 'border-box' }}>
+                <h2 style={{ fontSize: '1.2rem', margin: '0 0 8px 0', color: 'var(--text-primary)' }}>Recommendation Preferences</h2>
+                <p style={{ color: 'var(--text-secondary)', margin: '0 0 16px 0', lineHeight: '1.5', flex: 1, fontSize: '0.95rem' }}>
                     Set specific topics or keywords you want to see in your "Recommended For You" feed on the home page.
                     Leave empty to see recently trending articles.
                 </p>
 
                 <label
                     htmlFor="keywords"
-                    style={{ display: 'block', marginBottom: '8px', fontWeight: 500, color: 'var(--text-primary)' }}
+                    style={{ display: 'block', marginBottom: '2px', fontWeight: 500, color: 'var(--text-primary)', fontSize: '0.9rem' }}
                 >
                     Keywords
                 </label>
                 <div style={{
                     border: '1px solid var(--border)',
                     borderRadius: '24px',
-                    padding: '8px 16px',
+                    padding: '6px 16px',
                     background: 'var(--bg-card)',
-                    minHeight: '48px',
+                    minHeight: '42px',
                     display: 'flex',
                     flexWrap: 'wrap',
                     gap: '8px',
                     alignItems: 'center',
-                    marginBottom: '12px'
+                    marginBottom: '0'
                 }}>
                     {keywordTags.map((tag, idx) => (
                         <span key={idx} style={{
                             background: 'var(--accent)',
                             color: 'white',
-                            padding: '4px 12px',
+                            padding: '2px 10px',
                             borderRadius: '16px',
-                            fontSize: '0.9rem',
+                            fontSize: '0.85rem',
                             display: 'inline-flex',
                             alignItems: 'center',
-                            gap: '6px'
+                            gap: '4px'
                         }}>
                             {tag}
                             <button
@@ -185,7 +189,7 @@ export default function Settings({ session }: SettingsProps) {
                                     border: 'none',
                                     color: 'white',
                                     cursor: 'pointer',
-                                    fontSize: '1.1rem',
+                                    fontSize: '1rem',
                                     lineHeight: '1',
                                     padding: '0',
                                     marginLeft: '2px'
@@ -201,28 +205,88 @@ export default function Settings({ session }: SettingsProps) {
                         value={keywordInput}
                         onChange={(e) => setKeywordInput(e.target.value)}
                         onKeyDown={handleAddKeyword}
-                        placeholder={keywordTags.length === 0 ? "Type a keyword and press Enter..." : "Add another..."}
+                        placeholder={keywordTags.length === 0 ? "Type a keyword..." : "Add..."}
                         style={{
                             border: 'none',
                             outline: 'none',
                             background: 'transparent',
                             color: 'var(--text-primary)',
                             flex: 1,
-                            minWidth: '150px',
-                            fontSize: '1rem'
+                            minWidth: '100px',
+                            fontSize: '0.95rem'
                         }}
                     />
                 </div>
+            </div>
 
-                <h2 style={{ fontSize: '1.2rem', marginBottom: '15px', color: 'var(--text-primary)', marginTop: '30px' }}>OpenAI Configuration</h2>
-                <p style={{ color: 'var(--text-secondary)', marginBottom: '20px', lineHeight: '1.5' }}>
+            {/* Tile 2: Briefing Schedule */}
+            <div className="result-item" style={{ marginBottom: '4px', padding: '24px', width: '100%', boxSizing: 'border-box' }}>
+                <h2 style={{ fontSize: '1.2rem', margin: '0 0 8px 0', color: 'var(--text-primary)' }}>Daily Briefing Schedule</h2>
+                <p style={{ color: 'var(--text-secondary)', margin: '0 0 16px 0', lineHeight: '1.5', flex: 1, fontSize: '0.95rem' }}>
+                    Configure how and when your daily audio briefing is generated.
+                </p>
+
+                <div style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    marginBottom: '0',
+                    background: 'var(--bg-card)',
+                    padding: '12px 16px',
+                    borderRadius: '12px',
+                    border: '1px solid var(--border)',
+                    width: '100%',
+                    boxSizing: 'border-box'
+                }}>
+                    <div>
+                        <span style={{ fontWeight: 500, color: 'var(--text-primary)', display: 'block', fontSize: '0.95rem' }}>Auto-generate at 6:00 AM</span>
+                        <span style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
+                            Ready for your morning routine
+                        </span>
+                    </div>
+                    <label className="switch" style={{ position: 'relative', display: 'inline-block', width: '42px', height: '24px' }}>
+                        <input
+                            type="checkbox"
+                            checked={briefingEnabled}
+                            onChange={(e) => setBriefingEnabled(e.target.checked)}
+                            style={{ opacity: 0, width: 0, height: 0 }}
+                        />
+                        <span style={{
+                            position: 'absolute',
+                            cursor: 'pointer',
+                            top: 0, left: 0, right: 0, bottom: 0,
+                            backgroundColor: briefingEnabled ? 'var(--accent)' : 'var(--text-secondary)',
+                            borderRadius: '24px',
+                            transition: '.4s',
+                            opacity: briefingEnabled ? 1 : 0.5
+                        }}>
+                            <span style={{
+                                position: 'absolute',
+                                content: '""',
+                                height: '18px',
+                                width: '18px',
+                                left: briefingEnabled ? '20px' : '3px',
+                                bottom: '3px',
+                                backgroundColor: 'white',
+                                borderRadius: '50%',
+                                transition: '.4s'
+                            }}></span>
+                        </span>
+                    </label>
+                </div>
+            </div>
+
+            {/* Tile 3: OpenAI Configuration */}
+            <div className="result-item" style={{ marginBottom: '4px', padding: '24px', width: '100%', boxSizing: 'border-box' }}>
+                <h2 style={{ fontSize: '1.2rem', margin: '0 0 8px 0', color: 'var(--text-primary)' }}>OpenAI Configuration</h2>
+                <p style={{ color: 'var(--text-secondary)', margin: '0 0 16px 0', lineHeight: '1.5', flex: 1, fontSize: '0.95rem' }}>
                     Provide your OpenAI API Key to enable AI Summaries and Audio generation.
-                    Your key is stored securely and only used for your requests.
+                    Your key is stored securely.
                 </p>
 
                 <label
                     htmlFor="openaiKey"
-                    style={{ display: 'block', marginBottom: '8px', fontWeight: 500, color: 'var(--text-primary)' }}
+                    style={{ display: 'block', marginBottom: '8px', fontWeight: 500, color: 'var(--text-primary)', fontSize: '0.9rem' }}
                 >
                     OpenAI API Key
                 </label>
@@ -236,12 +300,12 @@ export default function Settings({ session }: SettingsProps) {
                                 disabled
                                 style={{
                                     flex: 1,
-                                    padding: '12px 20px',
+                                    padding: '8px 16px',
                                     borderRadius: '24px',
                                     border: '1px solid var(--border)',
                                     background: 'var(--bg-card)',
                                     color: 'var(--text-secondary)',
-                                    fontSize: '1rem',
+                                    fontSize: '0.95rem',
                                     opacity: 0.7,
                                     cursor: 'not-allowed'
                                 }}
@@ -249,12 +313,12 @@ export default function Settings({ session }: SettingsProps) {
                             <button
                                 onClick={handleResetKey}
                                 className="action-btn"
-                                style={{ whiteSpace: 'nowrap' }}
+                                style={{ whiteSpace: 'nowrap', padding: '8px 16px' }}
                             >
                                 Reset Key
                             </button>
                         </div>
-                        <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '12px' }}>
+                        <p style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', margin: '0' }}>
                             ✓ API key is configured and ready to use
                         </p>
                     </div>
@@ -269,28 +333,29 @@ export default function Settings({ session }: SettingsProps) {
                             className="settings-input"
                             style={{
                                 width: '100%',
-                                padding: '12px 20px',
+                                padding: '10px 16px',
                                 borderRadius: '24px',
                                 border: '1px solid var(--border)',
                                 marginBottom: '12px',
                                 background: 'var(--bg-card)',
                                 color: 'var(--text-primary)',
-                                fontSize: '1rem'
+                                fontSize: '0.95rem'
                             }}
                         />
                         <button
                             onClick={handleSave}
                             disabled={loading}
                             className="action-btn"
+                            style={{ width: '100%' }}
                         >
                             {loading ? 'Saving...' : 'Save API Key'}
                         </button>
                     </div>
                 )}
 
-                {message && <div style={{ color: 'green', marginBottom: '15px', marginTop: '20px' }}>{message}</div>}
-                {error && <div style={{ color: 'red', marginBottom: '15px', marginTop: '20px' }}>{error}</div>}
+                {message && <div style={{ color: 'green', margin: '12px 0 0 0', fontSize: '0.9rem' }}>{message}</div>}
+                {error && <div style={{ color: 'red', margin: '12px 0 0 0', fontSize: '0.9rem' }}>{error}</div>}
             </div>
-        </div>
+        </div >
     )
 }

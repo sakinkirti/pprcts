@@ -451,6 +451,125 @@ app.get('/api/briefings/history', async (req, res) => {
 
 
 // Endpoint to get or generate the Daily Podcast
+// Helper to generate daily podcast
+const generateDailyPodcast = async (userId, supabaseClient) => {
+  const today = new Date().toISOString().split('T')[0];
+  console.log('Generating Daily Podcast for user:', userId);
+
+  // 1. Fetch User Interests from Library
+  const { data: libraryData } = await supabaseClient
+    .from('user_library')
+    .select('papers(title, abstract)')
+    .eq('user_id', userId)
+    .order('saved_at', { ascending: false })
+    .limit(20);
+
+  const interests = libraryData?.map(i => i.papers?.title).join('\n') || '';
+
+  // 2. Fetch API Key
+  const { data: userSettings } = await supabaseClient
+    .from('user_settings')
+    .select('openai_key')
+    .eq('user_id', userId)
+    .single();
+
+  const openaiApiKey = userSettings?.openai_key;
+  if (!openaiApiKey) {
+    throw new Error('OpenAI API key required for podcast generation');
+  }
+
+  // 3. Generate Search Terms
+  const termRes = await axios.post('https://api.openai.com/v1/chat/completions', {
+    model: 'gpt-4o',
+    messages: [
+      { role: 'system', content: 'You are a research assistant. Generate 3 specific, compound search terms for PubMed based on the user\'s recent paper titles. The terms should be related but distinct from the exact titles to find new, adjacent research. Return ONLY the 3 terms separated by OR.' },
+      { role: 'user', content: `User's recent papers:\n${interests || 'Trending Today'}` }
+    ],
+    temperature: 0.9
+  }, { headers: { 'Authorization': `Bearer ${openaiApiKey}` } });
+
+  const searchTerms = termRes.data.choices[0].message.content;
+  const fullQuery = `(${searchTerms}) AND 2024/01:2025/12[dp]`;
+
+  console.log('[Daily Podcast] Query:', fullQuery);
+
+  // 4. Search PubMed
+  const papers = await fetchPubMedResults(fullQuery, 5);
+
+  if (papers.length === 0) {
+    throw new Error('No new papers found for daily podcast today.');
+  }
+
+  // 5. Generate Podcast Script & Title
+  const papersText = papers.map((p, i) => `Paper ${i + 1}: ${p.title} by ${p.authors.slice(0, 2).join(', ')}. Abstract: ${p.abstract}`).join('\n\n');
+
+  const scriptRes = await axios.post('https://api.openai.com/v1/chat/completions', {
+    model: 'gpt-4o',
+    messages: [
+      { role: 'system', content: 'You are a charismatic podcast host. Write a script for a 10-minute daily research update. Connect the papers into a narrative flow. Discuss agreements, disagreements, or thematic links. Keep it engaging, accessible but scientific. Do not use headers or "Host:" labels, just the spoken text.\n\nIMPORTANT: Return your response as a valid JSON object with three fields:\n1. "title": A short, catchy, 3-6 word title for this episode based on the topics discussed.\n2. "summary": A 1-3 sentence summary of the briefing to help the user decide if they should listen.\n3. "script": The full spoken script text.' },
+      { role: 'user', content: `Here are the top 5 papers for today:\n${papersText}` }
+    ],
+    response_format: { type: "json_object" }
+  }, { headers: { 'Authorization': `Bearer ${openaiApiKey}` } });
+
+  const content = JSON.parse(scriptRes.data.choices[0].message.content);
+  const transcript = content.script;
+  const episodeTitle = content.title || `Daily Research Update: ${today}`;
+  const episodeSummary = content.summary;
+
+  // 6. Generate Audio (TTS)
+  const chunkSize = 4096;
+  const chunks = [];
+  for (let i = 0; i < transcript.length; i += chunkSize) {
+    chunks.push(transcript.slice(i, i + chunkSize));
+  }
+
+  const audioBuffers = [];
+  for (const chunk of chunks) {
+    const ttsRes = await axios.post('https://api.openai.com/v1/audio/speech', {
+      model: 'tts-1',
+      input: chunk,
+      voice: 'echo',
+      response_format: 'mp3'
+    }, {
+      headers: { 'Authorization': `Bearer ${openaiApiKey}` },
+      responseType: 'arraybuffer'
+    });
+    audioBuffers.push(Buffer.from(ttsRes.data));
+  }
+  const finalAudio = Buffer.concat(audioBuffers);
+
+  // 7. Save to Storage and DB
+  const fileName = `daily_${userId}_${today}.mp3`;
+
+  // Upload using provided client (Authenticated or Admin)
+  const { error: uploadError } = await supabaseClient.storage
+    .from('daily-podcasts')
+    .upload(fileName, finalAudio, { contentType: 'audio/mpeg' });
+
+  if (uploadError) throw uploadError;
+
+  const { data: newPodcast, error: insertError } = await supabaseClient
+    .from('daily_podcasts')
+    .insert({
+      user_id: userId,
+      date: today,
+      title: episodeTitle,
+      summary: episodeSummary,
+      transcript: transcript,
+      audio_path: fileName,
+      paper_ids: papers.map(p => p.pmid),
+      papers_metadata: papers
+    })
+    .select()
+    .single();
+
+  if (insertError) throw insertError;
+
+  return newPodcast;
+};
+
+// Endpoint to CHECK for Daily Podcast
 app.get('/api/daily-podcast', async (req, res) => {
   if (!req.user) {
     return res.status(401).json({ error: 'Unauthorized' });
@@ -458,7 +577,7 @@ app.get('/api/daily-podcast', async (req, res) => {
 
   try {
     const today = new Date().toISOString().split('T')[0];
-    const { data: existingPodcast, error: fetchError } = await req.supabase
+    const { data: existingPodcast } = await req.supabase
       .from('daily_podcasts')
       .select('*')
       .eq('user_id', req.user.id)
@@ -466,10 +585,9 @@ app.get('/api/daily-podcast', async (req, res) => {
       .single();
 
     if (existingPodcast) {
-      // Generate a signed URL for the audio
       const { data: signedUrlData } = await req.supabase.storage
         .from('daily-podcasts')
-        .createSignedUrl(existingPodcast.audio_path, 3600 * 24); // 24 hours
+        .createSignedUrl(existingPodcast.audio_path, 3600 * 24);
 
       return res.json({
         ...existingPodcast,
@@ -477,142 +595,87 @@ app.get('/api/daily-podcast', async (req, res) => {
       });
     }
 
-    // Check if it is past 5 AM (user local time would be better, but defaulting to UTC-ish or Server time check)
-    // For simplicity in this demo, we allow generation if it doesn't exist, effectively "Lazy Loading" on first visit of the day
-
-    console.log('Generating Daily Podcast for user:', req.user.id);
-
-    // 1. Fetch User Interests from Library
-    const { data: libraryData } = await req.supabase
-      .from('user_library')
-      .select('papers(title, abstract)')
-      .eq('user_id', req.user.id)
-      .order('saved_at', { ascending: false })
-      .limit(20);
-
-    const interests = libraryData?.map(i => i.papers?.title).join('\n') || '';
-
-    // 2. Fetch API Key
-    const { data: userSettings } = await req.supabase
-      .from('user_settings')
-      .select('openai_key')
-      .eq('user_id', req.user.id)
-      .single();
-
-    const openaiApiKey = userSettings?.openai_key;
-    if (!openaiApiKey) {
-      return res.status(400).json({ error: 'OpenAI API key required for podcast generation' });
-    }
-
-    // 3. Generate Search Terms (High Temperature for variety)
-    const termRes = await axios.post('https://api.openai.com/v1/chat/completions', {
-      model: 'gpt-4o',
-      messages: [
-        { role: 'system', content: 'You are a research assistant. Generate 3 specific, compound search terms for PubMed based on the user\'s recent paper titles. The terms should be related but distinct from the exact titles to find new, adjacent research. Return ONLY the 3 terms separated by OR.' },
-        { role: 'user', content: `User's recent papers:\n${interests || 'Trending Today'}` } // Fallback if empty
-      ],
-      temperature: 0.9 // High temp for variety
-    }, { headers: { 'Authorization': `Bearer ${openaiApiKey}` } });
-
-    const searchTerms = termRes.data.choices[0].message.content;
-    const fullQuery = `(${searchTerms}) AND 2024/01:2025/12[dp]`;
-
-    console.log('[Daily Podcast] Query:', fullQuery);
-
-    // 4. Search PubMed
-    const papers = await fetchPubMedResults(fullQuery, 5);
-
-    if (papers.length === 0) {
-      return res.status(404).json({ error: 'No new papers found for daily podcast today.' });
-    }
-
-    // 5. Generate Podcast Script & Title
-    const papersText = papers.map((p, i) => `Paper ${i + 1}: ${p.title} by ${p.authors.slice(0, 2).join(', ')}. Abstract: ${p.abstract}`).join('\n\n');
-
-    const scriptRes = await axios.post('https://api.openai.com/v1/chat/completions', {
-      model: 'gpt-4o',
-      messages: [
-        { role: 'system', content: 'You are a charismatic podcast host. Write a script for a 10-minute daily research update. Connect the papers into a narrative flow. Discuss agreements, disagreements, or thematic links. Keep it engaging, accessible but scientific. Do not use headers or "Host:" labels, just the spoken text.\n\nIMPORTANT: Return your response as a valid JSON object with three fields:\n1. "title": A short, catchy, 3-6 word title for this episode based on the topics discussed.\n2. "summary": A 1-3 sentence summary of the briefing to help the user decide if they should listen.\n3. "script": The full spoken script text.' },
-        { role: 'user', content: `Here are the top 5 papers for today:\n${papersText}` }
-      ],
-      response_format: { type: "json_object" }
-    }, { headers: { 'Authorization': `Bearer ${openaiApiKey}` } });
-
-    const content = JSON.parse(scriptRes.data.choices[0].message.content);
-    const transcript = content.script;
-    const episodeTitle = content.title || `Daily Research Update: ${today}`;
-    const episodeSummary = content.summary;
-
-    // 6. Generate Audio (TTS)
-    // Chunking logic for long text
-    const chunkSize = 4096;
-    const chunks = [];
-    for (let i = 0; i < transcript.length; i += chunkSize) {
-      chunks.push(transcript.slice(i, i + chunkSize));
-    }
-
-    const audioBuffers = [];
-    for (const chunk of chunks) {
-      const ttsRes = await axios.post('https://api.openai.com/v1/audio/speech', {
-        model: 'tts-1',
-        input: chunk,
-        voice: 'echo', // Different voice for podcast
-        response_format: 'mp3'
-      }, {
-        headers: { 'Authorization': `Bearer ${openaiApiKey}` },
-        responseType: 'arraybuffer'
-      });
-      audioBuffers.push(Buffer.from(ttsRes.data));
-    }
-    const finalAudio = Buffer.concat(audioBuffers);
-
-    // 7. Save to Storage and DB
-    const fileName = `daily_${req.user.id}_${today}.mp3`;
-
-    // Upload using authenticated client (Requires Storage RLS Policy)
-    const { error: uploadError } = await req.supabase.storage
-      .from('daily-podcasts')
-      .upload(fileName, finalAudio, { contentType: 'audio/mpeg' });
-
-    if (uploadError) throw uploadError;
-
-    const { data: newPodcast, error: insertError } = await req.supabase
-      .from('daily_podcasts')
-      .insert({
-        user_id: req.user.id,
-        date: today,
-        title: episodeTitle,
-        summary: episodeSummary,
-        transcript: transcript,
-        audio_path: fileName,
-        paper_ids: papers.map(p => p.pmid),
-        papers_metadata: papers // Storing full metadata for the UI modal
-      })
-      .select()
-      .single();
-
-    if (insertError) {
-      console.error('Insert Error User ID:', req.user.id);
-      throw insertError;
-    }
-
-    if (insertError) throw insertError;
-
-    // Return the new podcast with signed URL
-    const { data: signedUrlData } = await req.supabase.storage
-      .from('daily-podcasts')
-      .createSignedUrl(fileName, 3600 * 24);
-
-    res.json({
-      ...newPodcast,
-      audio_url: signedUrlData?.signedUrl
-    });
-
+    // New Behavior: Return 404 explicitly to trigger "Generate" button UI
+    res.status(404).json({ error: 'Daily briefing not yet generated for today.', code: 'not_generated' });
   } catch (error) {
-    console.error('Daily Podcast Error:', error.message);
-    res.status(500).json({ error: 'Failed to generate daily podcast', details: error.message });
+    console.error('Daily Podcast Check Error:', error.message);
+    res.status(500).json({ error: 'Failed to check daily podcast status' });
   }
 });
+
+// Endpoint to GENERATE Daily Podcast explicitly
+app.post('/api/daily-podcast/generate', async (req, res) => {
+  if (!req.user) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    const podcast = await generateDailyPodcast(req.user.id, req.supabase);
+
+    // Generate signed URL
+    const { data: signedUrlData } = await req.supabase.storage
+      .from('daily-podcasts')
+      .createSignedUrl(podcast.audio_path, 3600 * 24);
+
+    res.json({
+      ...podcast,
+      audio_url: signedUrlData?.signedUrl
+    });
+  } catch (error) {
+    console.error('Daily Podcast Generation Error:', error.message);
+    res.status(500).json({ error: error.message || 'Failed to generate daily podcast' });
+  }
+});
+
+// Scheduler for 6 AM Briefings
+setInterval(async () => {
+  const now = new Date();
+  // Check if it's 6:00 AM (Server Time)
+  if (now.getHours() === 6 && now.getMinutes() === 0) {
+    console.log('[Scheduler] Running 6 AM Briefing Generation...');
+
+    // Fetch users who have enabled briefings
+    const { data: users, error } = await supabase
+      .from('user_settings')
+      .select('user_id')
+      .eq('briefing_enabled', true);
+
+    if (error) {
+      console.error('[Scheduler] Failed to fetch settings:', error);
+      return;
+    }
+
+    if (users && users.length > 0) {
+      console.log(`[Scheduler] Found ${users.length} users with briefings enabled.`);
+      const today = new Date().toISOString().split('T')[0];
+
+      for (const user of users) {
+        // Check if already generated today
+        const { data: existing } = await supabase
+          .from('daily_podcasts')
+          .select('id')
+          .eq('user_id', user.user_id)
+          .eq('date', today)
+          .single();
+
+        if (!existing) {
+          try {
+            console.log(`[Scheduler] Generating for user ${user.user_id}...`);
+            // Note: using global 'supabase' client. Ensure SUPABASE_KEY is service_role or RLS allows this.
+            await generateDailyPodcast(user.user_id, supabase);
+            console.log(`[Scheduler] Success for user ${user.user_id}`);
+          } catch (e) {
+            console.error(`[Scheduler] Failed for user ${user.user_id}:`, e.message);
+          }
+        } else {
+          console.log(`[Scheduler] Already exists for user ${user.user_id}`);
+        }
+      }
+    } else {
+      console.log('[Scheduler] No users have briefings enabled.');
+    }
+  }
+}, 60000); // Check every minute
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
