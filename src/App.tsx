@@ -151,6 +151,16 @@ function AppContent() {
           }}
         />
       )}
+
+      <footer className="fixed-support-footer">
+        <a
+          href="https://buymeacoffee.com/sakinkirti"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          If you find this tool useful, consider supporting by buying me a coffee ☕
+        </a>
+      </footer>
     </div>
   )
 }

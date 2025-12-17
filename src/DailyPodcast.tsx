@@ -17,26 +17,22 @@ export default function DailyPodcast({ session, setGlobalAudio, globalAudio, isP
     const [showModal, setShowModal] = useState(false);
 
     useEffect(() => {
+        let isStopped = false;
+        let pollTimer: any = null;
+
         const fetchDailyPodcast = async () => {
-            if (!session) return;
+            if (!session || isStopped) return;
 
-            // Avoid refetching if already loaded
-            if (podcast) return;
-
-            setLoading(true);
+            const userDate = new Date().toLocaleDateString('en-CA');
             try {
-                const res = await fetch('http://localhost:5001/api/daily-podcast', {
+                const res = await fetch(`http://localhost:5001/api/daily-podcast?date=${userDate}`, {
                     headers: {
                         'Authorization': `Bearer ${session.access_token}`
                     }
                 });
 
                 if (res.status === 404) {
-                    const data = await res.json().catch(() => ({}));
-                    if (data.code === 'not_generated') {
-                        setError(''); // Clear any previous errors
-                        setPodcast(null);
-                    }
+                    setPodcast(null);
                     setLoading(false);
                     return;
                 }
@@ -48,19 +44,28 @@ export default function DailyPodcast({ session, setGlobalAudio, globalAudio, isP
 
                 const data = await res.json();
                 setPodcast(data);
+
+                // Start polling if status is 'generating'
+                if (data.status === 'generating' && !isStopped) {
+                    console.log('Briefing is generating, polling in 5s...');
+                    pollTimer = setTimeout(fetchDailyPodcast, 5000);
+                } else {
+                    setLoading(false);
+                }
             } catch (err: any) {
                 console.error('Error loading daily podcast:', err);
                 setError(err.message || 'Could not load daily podcast.');
-            } finally {
                 setLoading(false);
             }
         };
 
-        const timer = setTimeout(() => {
-            fetchDailyPodcast();
-        }, 1000); // Reduced delay for better UX
+        const initialTimer = setTimeout(fetchDailyPodcast, 1000);
 
-        return () => clearTimeout(timer);
+        return () => {
+            isStopped = true;
+            clearTimeout(initialTimer);
+            clearTimeout(pollTimer);
+        };
     }, [session]);
 
     const handleGenerate = async (e: React.MouseEvent) => {
@@ -69,12 +74,15 @@ export default function DailyPodcast({ session, setGlobalAudio, globalAudio, isP
         setLoading(true);
         setError('');
 
+        const userDate = new Date().toLocaleDateString('en-CA');
         try {
             const res = await fetch('http://localhost:5001/api/daily-podcast/generate', {
                 method: 'POST',
                 headers: {
-                    'Authorization': `Bearer ${session.access_token}`
-                }
+                    'Authorization': `Bearer ${session.access_token}`,
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ date: userDate })
             });
 
             if (!res.ok) {
@@ -149,18 +157,18 @@ export default function DailyPodcast({ session, setGlobalAudio, globalAudio, isP
                     flexDirection: 'column',
                     gap: '8px'
                 }}>
-                    {loading ? (
+                    {loading || (podcast?.status === 'generating') ? (
                         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', color: 'var(--text-secondary)' }}>
                             <div className="loading-spinner" style={{ width: '16px', height: '16px', border: '2px solid var(--text-secondary)', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></div>
-                            <span style={{ fontSize: '0.9rem' }}>{podcast ? 'Curating your daily briefing...' : 'Generating your daily briefing...'}</span>
+                            <span style={{ fontSize: '0.9rem' }}>{podcast?.status === 'generating' ? 'Curating your daily briefing...' : 'Loading...'}</span>
                         </div>
-                    ) : error ? (
+                    ) : (error || podcast?.status === 'failed') ? (
                         <div style={{ color: 'red', fontSize: '0.9rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <span>{error}</span>
+                            <span>{error || podcast?.summary || 'Generation failed.'}</span>
                             <button
                                 onClick={(e) => {
                                     e.stopPropagation();
-                                    window.location.reload();
+                                    handleGenerate(e);
                                 }}
                                 style={{
                                     background: 'var(--bg-secondary)',
@@ -231,7 +239,7 @@ export default function DailyPodcast({ session, setGlobalAudio, globalAudio, isP
                                     )}
                                 </div>
                                 <div style={{ fontSize: '0.95rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                                    {new Date(podcast.date || new Date()).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}
+                                    {new Date((podcast.date || new Date().toLocaleDateString('en-CA')) + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}
                                 </div>
                                 {podcast.summary && (
                                     <p style={{
@@ -338,7 +346,7 @@ export default function DailyPodcast({ session, setGlobalAudio, globalAudio, isP
 
                         <h2 style={{ marginTop: 0, marginBottom: '20px', fontSize: '1.5rem' }}>Daily Briefing Papers</h2>
                         <p style={{ color: 'var(--text-secondary)', marginBottom: '24px' }}>
-                            The following papers were discussed in your daily briefing for {new Date(podcast.date).toLocaleDateString()}.
+                            The following papers were discussed in your daily briefing for {new Date(podcast.date + 'T00:00:00').toLocaleDateString()}.
                         </p>
 
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>

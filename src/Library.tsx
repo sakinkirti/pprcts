@@ -217,7 +217,11 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
                         items = items.concat(briefings.map(b => ({ ...b, type: 'briefing', sortDate: b.date })));
                     }
 
-                    items.sort((a, b) => new Date(b.sortDate).getTime() - new Date(a.sortDate).getTime());
+                    items.sort((a, b) => {
+                        const dateA = a.type === 'briefing' ? a.sortDate + 'T00:00:00' : a.sortDate;
+                        const dateB = b.type === 'briefing' ? b.sortDate + 'T00:00:00' : b.sortDate;
+                        return new Date(dateB).getTime() - new Date(dateA).getTime();
+                    });
 
                     return items.map((item, idx) => {
                         if (item.type === 'briefing') {
@@ -233,7 +237,7 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
                                                 {item.title}
                                             </div>
                                             <div className="briefing-meta" style={{ marginTop: '4px' }}>
-                                                {new Date(item.date).toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}
+                                                {new Date(item.date + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}
                                             </div>
                                             {item.summary && (
                                                 <p style={{
@@ -384,7 +388,7 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
 
                             <h2 style={{ marginTop: 0, marginBottom: '20px', fontSize: '1.5rem' }}>Daily Briefing Papers</h2>
                             <p style={{ color: 'var(--text-secondary)', marginBottom: '24px' }}>
-                                The following papers were discussed in your daily briefing for {new Date(selectedBriefing.date).toLocaleDateString()}.
+                                The following papers were discussed in your daily briefing for {new Date(selectedBriefing.date + 'T00:00:00').toLocaleDateString()}.
                             </p>
 
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>

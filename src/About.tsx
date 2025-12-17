@@ -1,3 +1,4 @@
+import SupportButton from './components/SupportButton'
 
 export default function About() {
     return (
@@ -13,11 +14,13 @@ export default function About() {
             </div>
 
             <div className="result-item" style={{ marginBottom: '0px' }}>
-                <h2 style={{ marginTop: 0, marginBottom: 0 }}>Funding</h2>
+                <h2 style={{ marginTop: 0, marginBottom: 0 }}>Support the Project</h2>
                 <p style={{ marginTop: 0, marginBottom: 0, lineHeight: '1.6', color: 'var(--text-secondary)' }}>
-                    This project is currently a self-funded initiative. It allows me to explore new technologies while building something useful for the community.
-                    There are no paywalls or ads, just a tool built for the love of science.
+                    This project is currently self-funded. It allows me to explore new technologies while building something useful for the community. To keep the database active, infrastructure running, and briefings free of ads, consider supporting the development.
                 </p>
+                <div style={{ display: 'flex', justifyContent: 'center' }}>
+                    <SupportButton />
+                </div>
             </div>
 
             <div className="result-item" style={{ marginBottom: '0px' }}>

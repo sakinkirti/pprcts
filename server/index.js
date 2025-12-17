@@ -457,159 +457,155 @@ app.get('/api/briefings/history', async (req, res) => {
 
 // Endpoint to get or generate the Daily Podcast
 // Helper to generate daily podcast
-const generateDailyPodcast = async (userId, supabaseClient) => {
-  const today = new Date().toISOString().split('T')[0];
-  console.log('Generating Daily Podcast for user:', userId);
+const generateDailyPodcast = async (userId, supabaseClient, userDate = null) => {
+  const today = userDate || new Date().toISOString().split('T')[0];
+  console.log('Generating Daily Podcast for user:', userId, 'Date:', today);
 
-  // 1. Fetch User Interests from Library
-  const { data: libraryData } = await supabaseClient
-    .from('user_library')
-    .select('papers(title, abstract)')
-    .eq('user_id', userId)
-    .order('saved_at', { ascending: false })
-    .limit(20);
+  try {
+    // 1. Fetch User Interests from Library
+    const { data: libraryData } = await supabaseClient
+      .from('user_library')
+      .select('papers(title, abstract)')
+      .eq('user_id', userId)
+      .order('saved_at', { ascending: false })
+      .limit(20);
 
-  const interests = libraryData?.map(i => i.papers?.title).join('\n') || '';
+    const interests = libraryData?.map(i => i.papers?.title).join('\n') || '';
 
-  // 2. Fetch API Key
-  const { data: userSettings } = await supabaseClient
-    .from('user_settings')
-    .select('openai_key')
-    .eq('user_id', userId)
-    .single();
+    // 2. Fetch API Key
+    const { data: userSettings } = await supabaseClient
+      .from('user_settings')
+      .select('openai_key')
+      .eq('user_id', userId)
+      .single();
 
-  const openaiApiKey = userSettings?.openai_key;
-  if (!openaiApiKey) {
-    throw new Error('OpenAI API key required for podcast generation');
-  }
+    const openaiApiKey = userSettings?.openai_key;
+    if (!openaiApiKey) {
+      throw new Error('OpenAI API key required for podcast generation');
+    }
 
-  // 3. Generate Search Terms
-  const termRes = await axios.post('https://api.openai.com/v1/chat/completions', {
-    model: 'gpt-4o',
-    messages: [
-      { role: 'system', content: 'You are a research assistant. Generate 3 specific, compound search terms for PubMed based on the user\'s recent paper titles. The terms should be related but distinct from the exact titles to find new, adjacent research. Return ONLY the 3 terms separated by OR.' },
-      { role: 'user', content: `User's recent papers:\n${interests || 'Trending Today'}` }
-    ],
-    temperature: 0.9
-  }, { headers: { 'Authorization': `Bearer ${openaiApiKey}` } });
+    // 3. Generate Search Terms
+    const termRes = await axios.post('https://api.openai.com/v1/chat/completions', {
+      model: 'gpt-4o',
+      messages: [
+        { role: 'system', content: 'You are a research assistant. Generate 3 specific, compound search terms for PubMed based on the user\'s recent paper titles. The terms should be related but distinct from the exact titles to find new, adjacent research. Return ONLY the 3 terms separated by OR.' },
+        { role: 'user', content: `User's recent papers:\n${interests || 'Trending Today'}` }
+      ],
+      temperature: 0.9
+    }, { headers: { 'Authorization': `Bearer ${openaiApiKey}` } });
 
-  const searchTerms = termRes.data.choices[0].message.content;
-  const fullQuery = `(${searchTerms}) AND 2024/01:2025/12[dp]`;
+    const searchTerms = termRes.data.choices[0].message.content;
+    const fullQuery = `(${searchTerms}) AND 2024/01:2025/12[dp]`;
 
-  console.log('[Daily Podcast] Query:', fullQuery);
+    // 4. Search PubMed
+    const papers = await fetchPubMedResults(fullQuery, 3); // Fetch top 3 papers
 
-  // 4. Search PubMed
-  const papers = await fetchPubMedResults(fullQuery, 5); // Fetch top 5 papers
+    if (papers.length === 0) {
+      throw new Error('No new papers found for daily podcast today.');
+    }
 
-  if (papers.length === 0) {
-    throw new Error('No new papers found for daily podcast today.');
-  }
+    const papersText = papers.map((p, i) => `Paper ${i + 1}: ${p.title} by ${p.authors.slice(0, 2).join(', ')}. Abstract: ${p.abstract}`).join('\n\n');
 
-  const papersText = papers.map((p, i) => `Paper ${i + 1}: ${p.title} by ${p.authors.slice(0, 2).join(', ')}. Abstract: ${p.abstract}`).join('\n\n');
+    // --- HIERARCHICAL GENERATION START ---
 
-  // --- HIERARCHICAL GENERATION START ---
-
-  // 5a. Step 1: Generate Outline
-  console.log('[Daily Podcast] Generating Outline...');
-  const outlineRes = await axios.post('https://api.openai.com/v1/chat/completions', {
-    model: 'gpt-4o',
-    messages: [
-      {
-        role: 'system',
-        content: 'You are an expert science communicator and podcast producer. Create a detailed outline for a 15-minute daily research briefing. The episode should flow naturally like a story. Structure it into 5-7 distinct sections (e.g., Intro, Deep Dive 1, Deep Dive 2, Synthesis/Connections, Outro). \n\nReturn valid JSON with:\n1. "title": Catchy episode title.\n2. "summary": 1-3 sentence summary.\n3. "sections": Array of objects { "id": number, "topic": string, "key_points": string[] }.'
-      },
-      { role: 'user', content: `Here are the papers to cover:\n${papersText}` }
-    ],
-    response_format: { type: "json_object" }
-  }, { headers: { 'Authorization': `Bearer ${openaiApiKey}` } });
-
-  const outlineData = JSON.parse(outlineRes.data.choices[0].message.content);
-  console.log('[Daily Podcast] Outline:', outlineData.title);
-
-  // 5b. Step 2: Generate Script Section by Section
-  let fullScript = "";
-  let previousContext = "This is the start of the episode.";
-
-  for (const section of outlineData.sections) {
-    console.log(`[Daily Podcast] Generating Section ${section.id}: ${section.topic}`);
-    const sectionRes = await axios.post('https://api.openai.com/v1/chat/completions', {
+    // 5a. Step 1: Generate Outline
+    console.log('[Daily Podcast] Generating Outline...');
+    const outlineRes = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: 'gpt-4o',
       messages: [
         {
           role: 'system',
-          content: 'You are a charismatic podcast host. Write the spoken script for ONE section of a 15-minute daily research update. Write ONLY the spoken text (no "Host:" labels, no sound effects). Keep it engaging, scientific but accessible. Ensure a smooth transition from the previous section.'
+          content: 'You are an expert science communicator and podcast producer. Create a detailed outline for a 15-minute daily research briefing. Structure it into 5-7 distinct sections. \n\nReturn valid JSON with:\n1. "title": Catchy episode title.\n2. "summary": 1-3 sentence summary.\n3. "sections": Array of objects { "id": number, "topic": string, "key_points": string[] }.'
         },
-        {
-          role: 'user',
-          content: `Current Section: ${section.topic}\nKey Points to Cover: ${section.key_points.join(', ')}\n\nContext/Previous Section Ended With: "...${previousContext.slice(-300)}"\n\nFull Paper Context:\n${papersText}\n\nReturn the 500 word script for this section.`
-        }
-      ]
+        { role: 'user', content: `Here are the papers to cover:\n${papersText}` }
+      ],
+      response_format: { type: "json_object" }
     }, { headers: { 'Authorization': `Bearer ${openaiApiKey}` } });
 
-    const sectionText = sectionRes.data.choices[0].message.content;
-    fullScript += sectionText + "\n\n";
-    previousContext = sectionText; // Update context for next iteration
+    const outlineData = JSON.parse(outlineRes.data.choices[0].message.content);
+
+    // 5b. Step 2: Generate Script Section by Section
+    let fullScript = "";
+    let previousContext = "This is the start of the episode.";
+
+    for (const section of outlineData.sections) {
+      const sectionRes = await axios.post('https://api.openai.com/v1/chat/completions', {
+        model: 'gpt-4o',
+        messages: [
+          {
+            role: 'system',
+            content: 'You are a charismatic podcast host. Write the spoken script for ONE section of a 15-minute daily research update. Write ONLY the spoken text. Ensure a smooth transition from the previous section.'
+          },
+          {
+            role: 'user',
+            content: `Current Section: ${section.topic}\nKey Points: ${section.key_points.join(', ')}\n\nContext/Previous Section Ended With: "...${previousContext.slice(-300)}"\n\nFull Paper Context:\n${papersText}\n\nReturn the 500 word script for this section.`
+          }
+        ]
+      }, { headers: { 'Authorization': `Bearer ${openaiApiKey}` } });
+
+      const sectionText = sectionRes.data.choices[0].message.content;
+      fullScript += sectionText + "\n\n";
+      previousContext = sectionText;
+    }
+
+    const transcript = fullScript;
+    const chunkSize = 4096;
+    const chunks = [];
+    for (let i = 0; i < transcript.length; i += chunkSize) {
+      chunks.push(transcript.slice(i, i + chunkSize));
+    }
+
+    const audioBuffers = [];
+    for (const chunk of chunks) {
+      const ttsRes = await axios.post('https://api.openai.com/v1/audio/speech', {
+        model: 'tts-1',
+        input: chunk,
+        voice: 'echo',
+        response_format: 'mp3'
+      }, {
+        headers: { 'Authorization': `Bearer ${openaiApiKey}` },
+        responseType: 'arraybuffer'
+      });
+      audioBuffers.push(Buffer.from(ttsRes.data));
+    }
+    const finalAudio = Buffer.concat(audioBuffers);
+    const fileName = `daily_${userId}_${today}.mp3`;
+
+    await supabaseClient.storage
+      .from('daily-podcasts')
+      .upload(fileName, finalAudio, { contentType: 'audio/mpeg', upsert: true });
+
+    const { data: newPodcast, error: insertError } = await supabaseClient
+      .from('daily_podcasts')
+      .upsert({
+        user_id: userId,
+        date: today,
+        title: outlineData.title || `Daily Research Update: ${today}`,
+        summary: outlineData.summary,
+        transcript: transcript,
+        audio_path: fileName,
+        paper_ids: papers.map(p => p.pmid),
+        papers_metadata: papers,
+        status: 'completed'
+      }, { onConflict: 'user_id, date' })
+      .select()
+      .single();
+
+    if (insertError) throw insertError;
+    return newPodcast;
+
+  } catch (error) {
+    console.error('Generation Job Error:', error.message);
+    await supabaseClient
+      .from('daily_podcasts')
+      .upsert({
+        user_id: userId,
+        date: today,
+        status: 'failed',
+        summary: `Error: ${error.message}`
+      }, { onConflict: 'user_id, date' });
+    throw error;
   }
-
-  // --- HIERARCHICAL GENERATION END ---
-
-  const episodeTitle = outlineData.title || `Daily Research Update: ${today}`;
-  const episodeSummary = outlineData.summary;
-  const transcript = fullScript;
-
-  // 6. Generate Audio (TTS)
-  // Note: Transcript is now much longer (~2500 words), so chunking is critical.
-  const chunkSize = 4096;
-  const chunks = [];
-  for (let i = 0; i < transcript.length; i += chunkSize) {
-    chunks.push(transcript.slice(i, i + chunkSize));
-  }
-
-  const audioBuffers = [];
-  console.log(`[Daily Podcast] Generating Audio (${chunks.length} chunks)...`);
-
-  for (const chunk of chunks) {
-    const ttsRes = await axios.post('https://api.openai.com/v1/audio/speech', {
-      model: 'tts-1',
-      input: chunk,
-      voice: 'echo',
-      response_format: 'mp3'
-    }, {
-      headers: { 'Authorization': `Bearer ${openaiApiKey}` },
-      responseType: 'arraybuffer'
-    });
-    audioBuffers.push(Buffer.from(ttsRes.data));
-  }
-  const finalAudio = Buffer.concat(audioBuffers);
-
-  // 7. Save to Storage and DB
-  const fileName = `daily_${userId}_${today}.mp3`;
-
-  // Upload using provided client (Authenticated or Admin)
-  const { error: uploadError } = await supabaseClient.storage
-    .from('daily-podcasts')
-    .upload(fileName, finalAudio, { contentType: 'audio/mpeg' });
-
-  if (uploadError) throw uploadError;
-
-  const { data: newPodcast, error: insertError } = await supabaseClient
-    .from('daily_podcasts')
-    .insert({
-      user_id: userId,
-      date: today,
-      title: episodeTitle,
-      summary: episodeSummary,
-      transcript: transcript,
-      audio_path: fileName,
-      paper_ids: papers.map(p => p.pmid),
-      papers_metadata: papers
-    })
-    .select()
-    .single();
-
-  if (insertError) throw insertError;
-
-  return newPodcast;
 };
 
 // Endpoint to CHECK for Daily Podcast
@@ -619,12 +615,12 @@ app.get('/api/daily-podcast', async (req, res) => {
   }
 
   try {
-    const today = new Date().toISOString().split('T')[0];
+    const queryDate = req.query.date || new Date().toISOString().split('T')[0];
     const { data: existingPodcast } = await req.supabase
       .from('daily_podcasts')
       .select('*')
       .eq('user_id', req.user.id)
-      .eq('date', today)
+      .eq('date', queryDate)
       .single();
 
     if (existingPodcast) {
@@ -652,21 +648,37 @@ app.post('/api/daily-podcast/generate', async (req, res) => {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
+  const { date } = req.body;
+  if (!date) {
+    return res.status(400).json({ error: 'Missing date' });
+  }
+
   try {
-    const podcast = await generateDailyPodcast(req.user.id, req.supabase);
+    // 1. Create/Update a 'generating' row
+    const { data: placeholder, error } = await req.supabase
+      .from('daily_podcasts')
+      .upsert({
+        user_id: req.user.id,
+        date: date,
+        status: 'generating',
+        title: 'Generating Briefing...',
+        summary: 'We are curating your personalized research update. This usually takes 1-2 minutes.'
+      }, { onConflict: 'user_id, date' })
+      .select()
+      .single();
 
-    // Generate signed URL
-    const { data: signedUrlData } = await req.supabase.storage
-      .from('daily-podcasts')
-      .createSignedUrl(podcast.audio_path, 3600 * 24);
+    if (error) throw error;
 
-    res.json({
-      ...podcast,
-      audio_url: signedUrlData?.signedUrl
-    });
+    // 2. Start generation in background (DO NOT AWAIT)
+    generateDailyPodcast(req.user.id, req.supabase, date)
+      .then(() => console.log(`Background generation success for ${req.user.id}`))
+      .catch(err => console.error(`Background generation failure for ${req.user.id}:`, err));
+
+    // 3. Return the placeholder immediately
+    res.json(placeholder);
   } catch (error) {
-    console.error('Daily Podcast Generation Error:', error.message);
-    res.status(500).json({ error: error.message || 'Failed to generate daily podcast' });
+    console.error('Daily Podcast Generation Init Error:', error.message);
+    res.status(500).json({ error: error.message || 'Failed to initialize daily podcast' });
   }
 });
 
