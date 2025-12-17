@@ -201,7 +201,7 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
                 </div>
             )}
 
-            <ul className="results-list">
+            <ul style={{ marginTop: '-1%' }} className="results-list">
                 {/* 
                   Merge and Sort Logic:
                   - Papers have 'saved_at'

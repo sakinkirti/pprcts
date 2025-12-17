@@ -85,12 +85,18 @@ function AppContent() {
           {menuOpen && (
             <div className="dropdown-menu">
               <Link to="/" onClick={() => setMenuOpen(false)} className="dropdown-link">Home</Link>
+
+              {session && (
+                <>
+                  <Link to="/library" onClick={() => setMenuOpen(false)} className="dropdown-link">Library</Link>
+                  <Link to="/settings" onClick={() => setMenuOpen(false)} className="dropdown-link">Settings</Link>
+                </>
+              )}
+
               <Link to="/about" onClick={() => setMenuOpen(false)} className="dropdown-link">About</Link>
 
               {session ? (
                 <>
-                  <Link to="/library" onClick={() => setMenuOpen(false)} className="dropdown-link">Library</Link>
-                  <Link to="/settings" onClick={() => setMenuOpen(false)} className="dropdown-link">Settings</Link>
                   <hr className="menu-divider" />
                   <div className="menu-email">{session.user.email}</div>
                   <button

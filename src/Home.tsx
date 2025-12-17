@@ -108,7 +108,8 @@ export default function Home({ session, authLoading, setGlobalAudio, globalAudio
             // And if the current state is empty (handled by component mount usually)
             fetchRecommendations();
         }
-    }, [session, authLoading]); // Re-fetch when auth finishes or session changes
+    }, [session?.user?.id, authLoading]); // Re-fetch when auth finishes or user changes
+
 
     const openPaperModal = (paper: any) => {
         setSelectedPaper(paper);
@@ -257,7 +258,7 @@ export default function Home({ session, authLoading, setGlobalAudio, globalAudio
 
             {/* Recommendations Header */}
             {!loading && !query && results.length === 0 && (
-                <div style={{ width: '100%', maxWidth: '700px', marginBottom: '10px' }}>
+                <div style={{ width: '100%', maxWidth: '700px', marginTop: 10 }}>
                     <h2 style={{ fontSize: '1.2rem', color: 'var(--text-secondary)', fontWeight: 500 }}>
                         {recLoading ? 'Finding articles for you...' : (recError ? 'Error' : recType)}
                     </h2>

@@ -1,7 +1,7 @@
 
 export default function About() {
     return (
-        <div className="container" style={{ maxWidth: '700px', margin: '0 auto', padding: '20px' }}>
+        <div className="container" style={{ maxWidth: '700px', margin: '0 auto', padding: '0px' }}>
 
             <div className="result-item" style={{ marginBottom: '0px' }}>
                 <h2 style={{ marginTop: 0, marginBottom: 0 }}>Why this exists</h2>

@@ -201,7 +201,7 @@ export default function DailyPodcast({ session, setGlobalAudio, globalAudio, isP
                                     padding: '8px 16px',
                                     borderRadius: '20px',
                                     cursor: 'pointer',
-                                    fontSize: '0.9rem',
+                                    fontSize: '1.0rem',
                                     fontWeight: 500,
                                     transition: 'background 0.2s'
                                 }}
