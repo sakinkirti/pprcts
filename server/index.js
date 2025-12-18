@@ -236,9 +236,9 @@ app.post('/api/summarize', async (req, res) => {
       return res.status(400).json({ error: 'OpenAI API key not configured', details: 'Please add your API Key in Settings.' });
     }
     // Request a much longer, narrative-style summary (4096 tokens for ~15 min audio)
-    const prompt = `You are an expert science communicator creating an engaging audio summary of a research paper. Your goal is to tell the story of this research in a natural, flowing narrative that would be compelling to listen to.
+    const prompt = `You are an expert science communicator creating an audio summary of a research paper. Your goal is to tell the story of this research in a natural, flowing narrative that would be compelling to listen to.
 
-Write a comprehensive summary (aim for 4096 tokens, approximately 3000-4000 words) that weaves together the background, methods, results, and discussion into a cohesive narrative. Instead of breaking these into separate sections, flow naturally between them as you would when telling an exciting story about a scientific discovery.
+Write a comprehensive summary (approximately 1000 words) that weaves together the background, methods, results, and discussion into a cohesive summary. Instead of breaking these into separate sections, flow naturally to create something similar to a podcast episode.
 
 Focus on:
 - The journey of discovery: What question drove this research? Why does it matter?
@@ -308,6 +308,8 @@ Abstract: ${abstract}`;
 // Endpoint to convert summary to speech using OpenAI TTS
 app.post('/api/tts', async (req, res) => {
   const { summary, pmid } = req.body;
+  console.log(`[TTS] Request received for PMID: ${pmid || 'none'}. Summary length: ${summary?.length || 0}`);
+
   if (!summary) {
     return res.status(400).json({ error: 'Missing summary text for TTS' });
   }
@@ -343,9 +345,8 @@ app.post('/api/tts', async (req, res) => {
     for (let i = 0; i < summary.length; i += chunkSize) {
       chunks.push(summary.slice(i, i + chunkSize));
     }
-    for (let i = 0; i < summary.length; i += chunkSize) {
-      chunks.push(summary.slice(i, i + chunkSize));
-    }
+
+    console.log(`[TTS] Generating audio for ${pmid || 'unsaved paper'} in ${chunks.length} chunks...`);
 
     if (!req.user) {
       return res.status(401).json({ error: 'Unauthorized: Please log in to generate audio.' });
@@ -367,7 +368,7 @@ app.post('/api/tts', async (req, res) => {
       const ttsRes = await axios.post('https://api.openai.com/v1/audio/speech', {
         model: 'tts-1',
         input: chunk,
-        voice: 'alloy',
+        voice: 'echo',
         speed: 1.15,
         response_format: 'mp3'
       }, {
@@ -384,19 +385,25 @@ app.post('/api/tts', async (req, res) => {
     // 2. Upload to Supabase Storage and Update DB if PMID exists
     if (pmid) {
       const fileName = `${pmid}_${Date.now()}.mp3`;
+      console.log(`[TTS] Uploading ${fileName} to storage (using user auth)...`);
       const { error: uploadError } = await req.supabase.storage
         .from('audio-summaries')
         .upload(fileName, stitchedAudio, {
-          contentType: 'audio/mpeg'
+          contentType: 'audio/mpeg',
+          upsert: true
         });
 
       if (!uploadError) {
-        await req.supabase
+        console.log(`[TTS] Successfully uploaded ${fileName}. Updating papers table...`);
+        // Use user's req.supabase to update the papers table
+        const { error: updateError } = await req.supabase
           .from('papers')
           .update({ audio_path: fileName })
           .eq('pmid', pmid);
+
+        if (updateError) console.error('[TTS] Error updating papers table:', updateError.message);
       } else {
-        console.error('Storage upload error:', uploadError);
+        console.error('[TTS] Storage upload error:', uploadError);
       }
     }
 
@@ -404,6 +411,7 @@ app.post('/api/tts', async (req, res) => {
       'Content-Type': 'audio/mpeg',
       'Content-Disposition': 'inline; filename="summary.mp3"'
     });
+    console.log(`[TTS] Sending ${stitchedAudio.length} bytes of audio back to client.`);
     res.send(stitchedAudio);
   } catch (error) {
     console.error('TTS error:', error?.response?.data || error.message);
@@ -571,7 +579,7 @@ const generateDailyPodcast = async (userId, supabaseClient, userDate = null) => 
     const finalAudio = Buffer.concat(audioBuffers);
     const fileName = `daily_${userId}_${today}.mp3`;
 
-    await supabaseClient.storage
+    await supabase.storage
       .from('daily-podcasts')
       .upload(fileName, finalAudio, { contentType: 'audio/mpeg', upsert: true });
 
@@ -624,6 +632,7 @@ app.get('/api/daily-podcast', async (req, res) => {
       .single();
 
     if (existingPodcast) {
+      console.log(`[GET /api/daily-podcast] Cache hit for ${queryDate}. Creating signed URL (using user auth)...`);
       const { data: signedUrlData } = await req.supabase.storage
         .from('daily-podcasts')
         .createSignedUrl(existingPodcast.audio_path, 3600 * 24);

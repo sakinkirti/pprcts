@@ -1,0 +1,2 @@
+- audio-summaries not being uploaded to storage bucket, but RLS errors have been taken care of
+- need to double check by deleting previous entries that have no audio_path and regenerating them
