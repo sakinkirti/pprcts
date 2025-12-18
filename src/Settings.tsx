@@ -362,7 +362,7 @@ export default function Settings({ session }: SettingsProps) {
             <div className="result-item" style={{ marginBottom: '4px', padding: '24px', width: '100%', boxSizing: 'border-box' }}>
                 <h2 style={{ fontSize: '1.2rem', margin: '0 0 8px 0', color: 'var(--text-primary)' }}>Support the Development</h2>
                 <p style={{ color: 'var(--text-secondary)', margin: '0 0 0 0', lineHeight: '1.5', flex: 1, fontSize: '0.95rem' }}>
-                    If you find this tool helpful, consider supporting the maintenance and API costs.
+                    If you find this tool helpful, consider supporting the maintenance, database, and API costs.
                 </p>
                 <SupportButton />
             </div>
