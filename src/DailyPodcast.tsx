@@ -47,8 +47,8 @@ export default function DailyPodcast({ session, setGlobalAudio, globalAudio, isP
 
                 // Start polling if status is 'generating'
                 if (data.status === 'generating' && !isStopped) {
-                    console.log('Briefing is generating, polling in 5s...');
-                    pollTimer = setTimeout(fetchDailyPodcast, 5000);
+                    console.log('Briefing is generating, polling in 10s...');
+                    pollTimer = setTimeout(fetchDailyPodcast, 10000);
                 } else {
                     setLoading(false);
                 }

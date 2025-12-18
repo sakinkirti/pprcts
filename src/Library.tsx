@@ -214,13 +214,11 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
                         items = items.concat(papers.map(p => ({ ...p, type: 'paper', sortDate: p.saved_at })));
                     }
                     if (filter === 'All' || filter === 'Briefings') {
-                        items = items.concat(briefings.map(b => ({ ...b, type: 'briefing', sortDate: b.date })));
+                        items = items.concat(briefings.map(b => ({ ...b, type: 'briefing', sortDate: b.created_at })));
                     }
 
                     items.sort((a, b) => {
-                        const dateA = a.type === 'briefing' ? a.sortDate + 'T00:00:00' : a.sortDate;
-                        const dateB = b.type === 'briefing' ? b.sortDate + 'T00:00:00' : b.sortDate;
-                        return new Date(dateB).getTime() - new Date(dateA).getTime();
+                        return new Date(b.sortDate).getTime() - new Date(a.sortDate).getTime();
                     });
 
                     return items.map((item, idx) => {

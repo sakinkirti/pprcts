@@ -243,10 +243,10 @@ Write a comprehensive summary (approximately 1000 words) that weaves together th
 Focus on:
 - The journey of discovery: What question drove this research? Why does it matter?
 - The narrative arc: How did the researchers approach the problem? What did they find?
-- The human element: What makes this research compelling or surprising?
-- The broader context: How does this fit into the bigger scientific picture?
+- The results: What experiments did the researchers perform? What did they find? How did they interpret their findings?
+- The broader context: How does this project impact the field moving forward?
 
-Maintain scientific accuracy while making it engaging and accessible.
+Your should dedicate 3/4 of the summary to the results and 1/4 to everything else. Maintain scientific accuracy while making it engaging and accessible.
 
 Article Details:
 Title: ${title}
@@ -398,8 +398,7 @@ app.post('/api/tts', async (req, res) => {
         // Use user's req.supabase to update the papers table
         const { error: updateError } = await req.supabase
           .from('papers')
-          .update({ audio_path: fileName })
-          .eq('pmid', pmid);
+          .upsert({ pmid, audio_path: fileName }, { onConflict: 'pmid' });
 
         if (updateError) console.error('[TTS] Error updating papers table:', updateError.message);
       } else {
@@ -430,7 +429,7 @@ app.get('/api/briefings/history', async (req, res) => {
       .from('daily_podcasts')
       .select('*')
       .eq('user_id', req.user.id)
-      .order('date', { ascending: false });
+      .order('created_at', { ascending: false });
 
     if (error) {
       throw error;
@@ -537,6 +536,7 @@ const generateDailyPodcast = async (userId, supabaseClient, userDate = null) => 
     let previousContext = "This is the start of the episode.";
 
     for (const section of outlineData.sections) {
+      console.log(`[Daily Podcast] Generating Section ${section.id}: ${section.topic}`);
       const sectionRes = await axios.post('https://api.openai.com/v1/chat/completions', {
         model: 'gpt-4o',
         messages: [
@@ -564,6 +564,7 @@ const generateDailyPodcast = async (userId, supabaseClient, userDate = null) => 
     }
 
     const audioBuffers = [];
+    console.log(`[Daily Podcast] Generating Audio chunk by chunk...`);
     for (const chunk of chunks) {
       const ttsRes = await axios.post('https://api.openai.com/v1/audio/speech', {
         model: 'tts-1',
@@ -579,10 +580,14 @@ const generateDailyPodcast = async (userId, supabaseClient, userDate = null) => 
     const finalAudio = Buffer.concat(audioBuffers);
     const fileName = `daily_${userId}_${today}.mp3`;
 
-    await supabase.storage
+    console.log(`[Daily Podcast] Uploading audio to storage bucket...`);
+    const { error: uploadError } = await supabaseClient.storage
       .from('daily-podcasts')
       .upload(fileName, finalAudio, { contentType: 'audio/mpeg', upsert: true });
 
+    if (uploadError) throw uploadError;
+
+    console.log(`[Daily Podcast] Inserting podcast metadata into DB...`);
     const { data: newPodcast, error: insertError } = await supabaseClient
       .from('daily_podcasts')
       .upsert({
@@ -632,14 +637,20 @@ app.get('/api/daily-podcast', async (req, res) => {
       .single();
 
     if (existingPodcast) {
-      console.log(`[GET /api/daily-podcast] Cache hit for ${queryDate}. Creating signed URL (using user auth)...`);
-      const { data: signedUrlData } = await req.supabase.storage
-        .from('daily-podcasts')
-        .createSignedUrl(existingPodcast.audio_path, 3600 * 24);
+      let audio_url = null;
+      if (existingPodcast.audio_path) {
+        console.log(`[GET /api/daily-podcast] Cache hit: serving audio for ${queryDate}`);
+        const { data: signedUrlData } = await req.supabase.storage
+          .from('daily-podcasts')
+          .createSignedUrl(existingPodcast.audio_path, 3600 * 24);
+        audio_url = signedUrlData?.signedUrl;
+      } else {
+        console.log(`[GET /api/daily-podcast] Polling status: ${existingPodcast.status} for ${queryDate}`);
+      }
 
       return res.json({
         ...existingPodcast,
-        audio_url: signedUrlData?.signedUrl
+        audio_url
       });
     }
 
@@ -671,7 +682,7 @@ app.post('/api/daily-podcast/generate', async (req, res) => {
         date: date,
         status: 'generating',
         title: 'Generating Briefing...',
-        summary: 'We are curating your personalized research update. This usually takes 1-2 minutes.'
+        summary: 'We are curating your personalized research update. This usually takes a few minutes.'
       }, { onConflict: 'user_id, date' })
       .select()
       .single();
