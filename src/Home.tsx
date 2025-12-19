@@ -45,7 +45,7 @@ export default function Home({ session, authLoading, setGlobalAudio, globalAudio
         // Clear recommendations when searching
         setRecommendations([])
         try {
-            const res = await fetch(`http://localhost:5001/api/search?q=${encodeURIComponent(query)}`)
+            const res = await fetch(`${API_URL}/api/search?q=${encodeURIComponent(query)}`)
             const data = await res.json()
             setResults(data.results || [])
         } catch (err: any) {
@@ -85,7 +85,7 @@ export default function Home({ session, authLoading, setGlobalAudio, globalAudio
                     }
                 }
 
-                const res = await fetch(`http://localhost:5001/api/recommendations?keywords=${encodeURIComponent(customKeywords)}`, { headers });
+                const res = await fetch(`${API_URL}/api/recommendations?keywords=${encodeURIComponent(customKeywords)}`, { headers });
                 const data = await res.json();
                 setRecommendations(data.results || []);
                 if (data.type) setRecType(data.type);
