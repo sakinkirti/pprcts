@@ -164,7 +164,8 @@ app.get('/api/recommendations', async (req, res) => {
     console.log('[DEBUG] Received Keywords:', customKeywords);
 
     if (customKeywords && customKeywords.trim() !== '') {
-      searchTerm = customKeywords;
+      const keywordsArray = customKeywords.split(',').map(k => k.trim()).filter(k => k !== '');
+      searchTerm = keywordsArray.join(' OR ');
       recommendationType = `Based on your interest in "${customKeywords}"`;
     }
 

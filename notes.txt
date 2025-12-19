@@ -1,6 +1,7 @@
 - [X] audio-summaries not being uploaded to storage bucket, but RLS errors have been taken care of
 - [X] need to double check by deleting previous entries that have no audio_path and regenerating them
 - [X] fix library sorting bug
-- [ ] allow users to delete items from their library (inlcuding briefings and papers)
+- [-] allow users to delete items from their library (inlcuding briefings and papers)
 
 - [ ] move to deploying v1 so i can get some feedback
+- [ ] change callback urls to pprcts domains
