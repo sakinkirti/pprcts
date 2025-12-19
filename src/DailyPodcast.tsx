@@ -1,6 +1,7 @@
 
 import { useState, useEffect } from 'react';
 import type { Session } from '@supabase/supabase-js';
+import { API_URL } from './config';
 
 interface DailyPodcastProps {
     session: Session | null;
@@ -25,7 +26,7 @@ export default function DailyPodcast({ session, setGlobalAudio, globalAudio, isP
 
             const userDate = new Date().toLocaleDateString('en-CA');
             try {
-                const res = await fetch(`http://localhost:5001/api/daily-podcast?date=${userDate}`, {
+                const res = await fetch(`${API_URL}/api/daily-podcast?date=${userDate}`, {
                     headers: {
                         'Authorization': `Bearer ${session.access_token}`
                     }
@@ -76,7 +77,7 @@ export default function DailyPodcast({ session, setGlobalAudio, globalAudio, isP
 
         const userDate = new Date().toLocaleDateString('en-CA');
         try {
-            const res = await fetch('http://localhost:5001/api/daily-podcast/generate', {
+            const res = await fetch(`${API_URL}/api/daily-podcast/generate`, {
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${session.access_token}`,

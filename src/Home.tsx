@@ -2,6 +2,7 @@
 import { useState, useEffect } from 'react'
 import { supabase } from './supabaseClient'
 import type { Session } from '@supabase/supabase-js'
+import { API_URL } from './config';
 import DailyPodcast from './DailyPodcast.tsx';
 
 interface HomeProps {
@@ -132,7 +133,7 @@ export default function Home({ session, authLoading, setGlobalAudio, globalAudio
         }
 
         try {
-            const res = await fetch('http://localhost:5001/api/summarize', {
+            const res = await fetch(`${API_URL}/api/summarize`, {
                 method: 'POST',
                 headers,
                 body: JSON.stringify({
@@ -185,7 +186,7 @@ export default function Home({ session, authLoading, setGlobalAudio, globalAudio
 
             const pmid = selectedPaper?.pmid;
 
-            fetch('http://localhost:5001/api/tts', {
+            fetch(`${API_URL}/api/tts`, {
                 method: 'POST',
                 headers,
                 body: JSON.stringify({ summary, pmid })

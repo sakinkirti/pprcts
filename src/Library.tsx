@@ -2,6 +2,7 @@
 import { useState, useEffect } from 'react'
 
 import type { Session } from '@supabase/supabase-js'
+import { API_URL } from './config';
 
 interface LibraryProps {
     session: Session | null;
@@ -46,8 +47,8 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
             };
 
             const [libRes, briefRes] = await Promise.all([
-                fetch('http://localhost:5001/api/library', { headers }),
-                fetch('http://localhost:5001/api/briefings/history', { headers })
+                fetch(`${API_URL}/api/library`, { headers }),
+                fetch(`${API_URL}/api/briefings/history`, { headers })
             ]);
 
             if (libRes.status === 401 || briefRes.status === 401) {
@@ -99,7 +100,7 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
         }
 
         try {
-            const res = await fetch('http://localhost:5001/api/summarize', {
+            const res = await fetch(`${API_URL}/api/summarize`, {
                 method: 'POST',
                 headers,
                 body: JSON.stringify({
@@ -153,7 +154,7 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
 
             const pmid = selectedPaper?.pmid;
 
-            fetch('http://localhost:5001/api/tts', {
+            fetch(`${API_URL}/api/tts`, {
                 method: 'POST',
                 headers,
                 body: JSON.stringify({ summary, pmid })
