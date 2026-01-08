@@ -236,18 +236,15 @@ app.post('/api/summarize', async (req, res) => {
     if (!openaiApiKey) {
       return res.status(400).json({ error: 'OpenAI API key not configured', details: 'Please add your API Key in Settings.' });
     }
-    // Request a much longer, narrative-style summary (4096 tokens for ~15 min audio)
-    const prompt = `You are an expert science communicator creating an audio summary of a research paper. Your goal is to tell the story of this research in a natural, flowing narrative that would be compelling to listen to.
-
-Write a comprehensive summary (approximately 1000 words) that weaves together the background, methods, results, and discussion into a cohesive summary. Instead of breaking these into separate sections, flow naturally to create something similar to a podcast episode.
-
-Focus on:
-- The journey of discovery: What question drove this research? Why does it matter?
-- The narrative arc: How did the researchers approach the problem? What did they find?
-- The results: What experiments did the researchers perform? What did they find? How did they interpret their findings?
-- The broader context: How does this project impact the field moving forward?
-
-Your should dedicate 3/4 of the summary to the results and 1/4 to everything else. Maintain scientific accuracy while making it engaging and accessible.
+    // Request a technical, information-dense summary
+    const prompt = `You are an expert science communicator. Your goal is to create a technical, information-dense audio summary of a research paper. 
+    
+    Guidelines:
+    - Avoid flowery language, clichés, and filler (e.g., "groundbreaking," "revolutionary," "journey of discovery").
+    - Focus heavily on the MOLECULAR/TECHNICAL METHODS and EXPLICIT RESULTS.
+    - Maintain scientific accuracy and use professional terminology.
+    - Dedicate 75% of the summary to the results and data, and 25% to background and implications.
+    - Write in a natural, spoken narrative style but prioritize density over drama.
 
 Article Details:
 Title: ${title}
@@ -512,7 +509,7 @@ const generateDailyPodcast = async (userId, supabaseClient, userDate = null) => 
       throw new Error('No new papers found for daily podcast today.');
     }
 
-    const papersText = papers.map((p, i) => `Paper ${i + 1}: ${p.title} by ${p.authors.slice(0, 2).join(', ')}. Abstract: ${p.abstract}`).join('\n\n');
+    const papersText = papers.map((p, i) => `Paper ${i + 1} [PMID: ${p.pmid}]: ${p.title} by ${p.authors.slice(0, 2).join(', ')}. Abstract:\n${p.abstract}`).join('\n\n');
 
     // --- HIERARCHICAL GENERATION START ---
 
@@ -523,9 +520,30 @@ const generateDailyPodcast = async (userId, supabaseClient, userDate = null) => 
       messages: [
         {
           role: 'system',
-          content: 'You are an expert science communicator and podcast producer. Create a detailed outline for a 15-minute daily research briefing. Structure it into 5-7 distinct sections. \n\nReturn valid JSON with:\n1. "title": Catchy episode title.\n2. "summary": 1-3 sentence summary.\n3. "sections": Array of objects { "id": number, "topic": string, "key_points": string[] }.'
+          content: `You are a professional research analyst and podcast producer. Create a detailed outline for a 12-15 minute technical research briefing. 
+          
+          Guidelines:
+          - The podcast should have a total of 12-15 minutes of content (~1800-2200 words).
+          - Structure: 1 Short Intro section, 3-5 Technical Deep Dive sections (mapping to the 3 papers), and 1 Wrap-up section.
+          - Style: Very informative, technical, and dense. Avoid flowery language and filler.
+          - Each Technical section must specify which paper it focuses on.
+          
+          Return valid JSON with:
+          1. "title": A professional, descriptive title (avoid clickbait).
+          2. "summary": A concise 2-sentence overview of the briefing's focus.
+          3. "sections": Array of objects:
+             { 
+               "id": number, 
+               "topic": string, 
+               "focus_paper_pmids": string[], // PMIDs of papers discussed in this section
+               "target_word_count": number, // Target word count for this section
+               "key_points": string[] // Specific technical points (methods, data points, conclusions)
+             }`
         },
-        { role: 'user', content: `Here are the papers to cover:\n${papersText}` }
+        {
+          role: 'user',
+          content: `Here are the papers to cover:\n\n${papersText}`
+        }
       ],
       response_format: { type: "json_object" }
     }, { headers: { 'Authorization': `Bearer ${openaiApiKey}` } });
@@ -534,27 +552,50 @@ const generateDailyPodcast = async (userId, supabaseClient, userDate = null) => 
 
     // 5b. Step 2: Generate Script Section by Section
     let fullScript = "";
-    let previousContext = "This is the start of the episode.";
+    let coveredPaperPmids = new Set();
 
     for (const section of outlineData.sections) {
       console.log(`[Daily Podcast] Generating Section ${section.id}: ${section.topic}`);
+
+      const focusPapers = papers.filter(p => section.focus_paper_pmids?.includes(p.pmid));
+
       const sectionRes = await axios.post('https://api.openai.com/v1/chat/completions', {
         model: 'gpt-4o',
         messages: [
           {
             role: 'system',
-            content: 'You are a charismatic podcast host. Write the spoken script for ONE section of a 15-minute daily research update. Write ONLY the spoken text. Ensure a smooth transition from the previous section.'
+            content: `You are a professional science narrator. Your style is direct, informative, and technical. 
+            
+            CRITICAL RULES:
+            - NO flowery language (e.g., "Groundbreaking," "Revolutionary," "Deep dive," "Incredible journey").
+            - NO repetitive transition phrases (e.g., "Now let's look at," "Moving on to"). 
+            - Focus HEAVILY on METHODS and RESULTS for technical sections. Describe HOW the study was done and EXPLICITLY what was found.
+            - Write in a natural spoken tone but with high information density.
+            - Do NOT repeat information already covered in previous sections.
+            - Do NOT re-introduce papers that have already been discussed unless adding new information.
+            - Use the target word count provided.`
           },
           {
             role: 'user',
-            content: `Current Section: ${section.topic}\nKey Points: ${section.key_points.join(', ')}\n\nContext/Previous Section Ended With: "...${previousContext.slice(-300)}"\n\nFull Paper Context:\n${papersText}\n\nReturn the 500 word script for this section.`
+            content: `Current Section Focus: ${section.topic}
+            Target Word Count: ${section.target_word_count}
+            Key Points for this section: ${section.key_points.join(', ')}
+            
+            Papers TO FOCUS ON in this section:
+            ${focusPapers.map(p => `[PMID: ${p.pmid}] ${p.title}\n${p.abstract}`).join('\n\n')}
+            
+            Context (Already Covered Papers): ${Array.from(coveredPaperPmids).join(', ') || 'None'}
+            
+            Task: Write a ${section.target_word_count}-word script for this section of the podcast. Ensure it flows naturally from the previous section if applicable, but do not waste words on pleasantries. Detail the methodologies and specific results.`
           }
         ]
       }, { headers: { 'Authorization': `Bearer ${openaiApiKey}` } });
 
       const sectionText = sectionRes.data.choices[0].message.content;
       fullScript += sectionText + "\n\n";
-      previousContext = sectionText;
+
+      // Track covered papers
+      section.focus_paper_pmids?.forEach(pmid => coveredPaperPmids.add(pmid));
     }
 
     const transcript = fullScript;
