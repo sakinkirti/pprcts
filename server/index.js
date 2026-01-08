@@ -139,6 +139,22 @@ const fetchPubMedResults = async (query, retmax = 20) => {
   }
 };
 
+// Helper to get PubMed date range for the last month
+const getLastMonthDateRange = () => {
+  const end = new Date();
+  const start = new Date();
+  start.setMonth(start.getMonth() - 1);
+
+  const formatDate = (date) => {
+    const yyyy = date.getFullYear();
+    const mm = String(date.getMonth() + 1).padStart(2, '0');
+    const dd = String(date.getDate()).padStart(2, '0');
+    return `${yyyy}/${mm}/${dd}`;
+  };
+
+  return `${formatDate(start)}:${formatDate(end)}[dp]`;
+};
+
 // Search endpoint for PubMed
 app.get('/api/search', async (req, res) => {
   const query = req.query.q;
@@ -156,7 +172,7 @@ app.get('/api/search', async (req, res) => {
 // Recommendations Endpoint
 app.get('/api/recommendations', async (req, res) => {
   try {
-    let searchTerm = '("Nature"[Journal] OR "Science"[Journal] OR "Cell"[Journal]) AND 2024/01:2025/12[dp]';
+    let searchTerm = `("Nature"[Journal] OR "Science"[Journal] OR "Cell"[Journal]) AND ${getLastMonthDateRange()}`;
     let recommendationType = 'Trending Today';
 
     // 1. Check for Custom Keywords from Client
@@ -500,7 +516,7 @@ const generateDailyPodcast = async (userId, supabaseClient, userDate = null) => 
     }, { headers: { 'Authorization': `Bearer ${openaiApiKey}` } });
 
     const searchTerms = termRes.data.choices[0].message.content;
-    const fullQuery = `(${searchTerms}) AND 2024/01:2025/12[dp]`;
+    const fullQuery = `(${searchTerms}) AND ${getLastMonthDateRange()}`;
 
     // 4. Search PubMed
     const papers = await fetchPubMedResults(fullQuery, 3); // Fetch top 3 papers
