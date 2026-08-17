@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 const express = require('express');
 // Polyfill for Node 18 environment where File is missing (needed by Supabase/Undici)
 const { Blob } = require('buffer');
@@ -11,66 +13,360 @@ if (!global.File) {
   };
 }
 const axios = require('axios');
-const cors = require('cors');
-const cheerio = require('cheerio');
-const Bottleneck = require('bottleneck');
-const { createClient } = require('@supabase/supabase-js');
-
-const limiter = new Bottleneck({
-  minTime: 334 // ~3 requests per second to stay within NCBI limits without API key
-});
-
-require('dotenv').config();
+const crypto = require('crypto');
+const {
+  publicClient,
+  adminClient,
+  createUserClient,
+  requireAdminClient,
+} = require('./supabase');
+const { encryptSecret, decryptSecret, getEncryptionKey } = require('./secrets');
+const {
+  buildBriefingQueries,
+  fetchBriefingCandidates,
+  fetchOpenAlexWork,
+  fetchOpenAlexWorks,
+  recentDate,
+} = require('./openalex');
+const { addPaperToLibrary } = require('./library');
+const {
+  getZonedDateTime,
+  isBriefingStale,
+  normalizeBriefingCadence,
+  shouldGenerateScheduledBriefing,
+  shouldRunSchedulerForUser,
+} = require('./briefing-schedule');
+const {
+  formatEvidenceForPrompt,
+  retrieveResearchEvidence,
+} = require('./research-content');
+const {
+  EVIDENCE_MAP_RESPONSE_FORMAT,
+  buildEvidenceExtractionMessages,
+  buildGroundedSummaryMessages,
+  buildSummaryProvenance,
+  countEvidenceClaims,
+  getSummaryTargetWords,
+  validateEvidenceMap,
+} = require('./grounding');
+const {
+  RESEARCH_BRIEFING_OUTLINE_RESPONSE_FORMAT,
+  buildResearchBriefingOutlineMessages,
+  buildResearchBriefingSectionMessages,
+  normalizeResearchBriefingOutline,
+} = require('./briefing-script');
+const {
+  securityHeaders,
+  corsAllowlist,
+  rateLimit,
+  requireAuth,
+  isIsoDate,
+} = require('./security');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
-app.use(cors()); // Allow all origins (for local dev safety)
-app.use(express.json());
+app.disable('x-powered-by');
 
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_KEY;
-const supabase = createClient(supabaseUrl, supabaseKey);
+function assertProductionConfiguration() {
+  if (process.env.NODE_ENV !== 'production') return;
+  requireAdminClient();
+  getEncryptionKey();
+  if (!process.env.RATE_LIMIT_HASH_SALT || process.env.RATE_LIMIT_HASH_SALT.length < 32) {
+    throw new Error('RATE_LIMIT_HASH_SALT must contain at least 32 characters in production');
+  }
+  const origins = String(process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (origins.length === 0 || origins.some((origin) => !origin.startsWith('https://'))) {
+    throw new Error('ALLOWED_ORIGINS must contain explicit HTTPS origins in production');
+  }
+}
+
+assertProductionConfiguration();
+
+app.set('trust proxy', 1);
+app.use(securityHeaders);
+app.use(corsAllowlist);
+app.use(express.json({ limit: '256kb', strict: true }));
+app.use(rateLimit({
+  windowMs: 60_000,
+  limit: 120,
+  keyPrefix: 'global',
+  client: adminClient,
+}));
 
 // Auth Middleware
 const authMiddleware = async (req, res, next) => {
-  const token = req.headers.authorization?.split(' ')[1];
+  const authorization = req.get('authorization');
+  req.supabase = publicClient;
 
-  // Default to global anon client if no token
-  req.supabase = supabase;
+  if (!authorization) return next();
+  const match = authorization.match(/^Bearer\s+([^\s]+)$/i);
+  if (!match) return res.status(401).json({ error: 'Malformed authorization header' });
 
-  if (token) {
-    // Create authenticated client for this request
-    const userSupabase = createClient(supabaseUrl, supabaseKey, {
-      auth: {
-        persistSession: false,
-        autoRefreshToken: false,
-        detectSessionInUrl: false,
-      },
-      global: {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      },
-    });
-    req.supabase = userSupabase;
-
-    const { data: { user }, error } = await supabase.auth.getUser(token);
-    if (!error && user) {
-      req.user = user;
-    }
+  const token = match[1];
+  const { data: { user }, error } = await publicClient.auth.getUser(token);
+  if (error || !user) {
+    return res.status(401).json({ error: 'Invalid or expired access token' });
   }
+  req.user = user;
+  req.accessToken = token;
+  req.supabase = createUserClient(token);
   next();
 };
 
 app.use(authMiddleware);
 
-// Retrieve User Library
-app.get('/api/library', async (req, res) => {
-  if (!req.user) {
-    return res.status(401).json({ error: 'Unauthorized' });
+app.get('/api/health', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ status: 'ok' });
+});
+
+const BRIEFING_FAILURE_SUMMARY = 'Generation failed. You can try again.';
+
+async function markBriefingFailed(client, userId, date) {
+  const { error } = await client
+    .from('daily_podcasts')
+    .update({ status: 'failed', summary: BRIEFING_FAILURE_SUMMARY })
+    .eq('user_id', userId)
+    .eq('date', date);
+  if (error) throw error;
+}
+
+async function recoverStaleBriefing(client, briefing) {
+  if (!isBriefingStale(briefing)) return briefing;
+  await markBriefingFailed(client, briefing.user_id, briefing.date);
+  return { ...briefing, status: 'failed', summary: BRIEFING_FAILURE_SUMMARY };
+}
+
+const aiRateLimit = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 20,
+  keyPrefix: 'ai',
+  client: adminClient,
+  failClosed: Boolean(adminClient),
+});
+
+async function getOpenAIKey(userId) {
+  const admin = requireAdminClient();
+  const { data, error } = await admin
+    .from('user_settings')
+    .select('openai_key_ciphertext')
+    .eq('user_id', userId)
+    .single();
+
+  if (error && error.code !== 'PGRST116') throw error;
+  if (data?.openai_key_ciphertext) return decryptSecret(data.openai_key_ciphertext);
+  return null;
+}
+
+async function getOpenAlexKey(userId) {
+  if (!userId) return null;
+  if (!adminClient) return process.env.OPENALEX_API_KEY || null;
+  const { data, error } = await adminClient
+    .from('user_settings')
+    .select('openalex_key_ciphertext')
+    .eq('user_id', userId)
+    .single();
+  if (error && error.code !== 'PGRST116') throw error;
+  return data?.openalex_key_ciphertext
+    ? decryptSecret(data.openalex_key_ciphertext)
+    : process.env.OPENALEX_API_KEY || null;
+}
+
+function openAIRequestConfig(apiKey, requestId, extra = {}) {
+  return {
+    ...extra,
+    timeout: 90_000,
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      'X-Client-Request-Id': requestId,
+      ...(extra.headers || {}),
+    },
+  };
+}
+
+const SUMMARY_MODEL = process.env.OPENAI_SUMMARY_MODEL || 'gpt-4o';
+const isSupportedPaperId = (value) => /^(?:\d{1,12}|W\d+)$/i.test(String(value || ''));
+async function extractValidatedEvidence(apiKey, paper, evidence, requestId, maxChars = 120_000) {
+  const formatted = formatEvidenceForPrompt(evidence, { maxChars });
+  if (!formatted.document || formatted.sections.length === 0) {
+    const error = new Error('No source evidence is available for a grounded summary');
+    error.code = 'INSUFFICIENT_EVIDENCE';
+    throw error;
   }
 
+  const response = await axios.post('https://api.openai.com/v1/chat/completions', {
+    model: SUMMARY_MODEL,
+    messages: buildEvidenceExtractionMessages(paper, formatted.document, evidence),
+    response_format: EVIDENCE_MAP_RESPONSE_FORMAT,
+    temperature: 0,
+    max_tokens: 5_000,
+  }, openAIRequestConfig(apiKey, `${requestId}-evidence`));
+
+  const raw = response.data.choices?.[0]?.message?.content;
+  const parsed = JSON.parse(raw || '{}');
+  const evidenceMap = validateEvidenceMap(parsed, formatted.sections);
+  if (countEvidenceClaims(evidenceMap) === 0) {
+    const error = new Error('The model could not verify any claims against the available source');
+    error.code = 'INSUFFICIENT_EVIDENCE';
+    throw error;
+  }
+  return evidenceMap;
+}
+
+async function generateGroundedBriefing(apiKey, paper, evidence, evidenceMap, requestId) {
+  const targetWords = getSummaryTargetWords(evidence, evidenceMap);
+  const response = await axios.post('https://api.openai.com/v1/chat/completions', {
+    model: SUMMARY_MODEL,
+    messages: buildGroundedSummaryMessages(paper, evidence, evidenceMap, targetWords),
+    temperature: 0.1,
+    max_tokens: Math.min(8_192, Math.max(1_200, targetWords * 2)),
+  }, openAIRequestConfig(apiKey, `${requestId}-briefing`));
+  return response.data.choices?.[0]?.message?.content?.trim() || '';
+}
+
+async function prepareGroundedPaper(apiKey, openAlexApiKey, paper, requestId, maxChars) {
+  const evidence = await retrieveResearchEvidence(paper, {
+    apiKey: openAlexApiKey,
+  });
+  const evidenceMap = await extractValidatedEvidence(apiKey, paper, evidence, requestId, maxChars);
+  return { evidence, evidenceMap };
+}
+
+app.get('/api/settings/openai-key/status', requireAuth, async (req, res) => {
+  try {
+    const admin = requireAdminClient();
+    const { data, error } = await admin
+      .from('user_settings')
+      .select('openai_key_ciphertext, openai_key_last_four')
+      .eq('user_id', req.user.id)
+      .single();
+    if (error && error.code !== 'PGRST116') throw error;
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      configured: Boolean(data?.openai_key_ciphertext),
+      lastFour: data?.openai_key_last_four || null,
+    });
+  } catch (error) {
+    console.error(`[${req.requestId}] OpenAI key status error:`, error.message);
+    res.status(error.code === 'SERVER_CONFIGURATION_ERROR' ? 503 : 500)
+      .json({ error: 'Unable to load API key status' });
+  }
+});
+
+app.put('/api/settings/openai-key', requireAuth, async (req, res) => {
+  const key = typeof req.body?.key === 'string' ? req.body.key.trim() : '';
+  if (!/^sk-[A-Za-z0-9_-]{20,200}$/.test(key)) {
+    return res.status(400).json({ error: 'Enter a valid OpenAI API key' });
+  }
+  try {
+    const admin = requireAdminClient();
+    const { error } = await admin.from('user_settings').upsert({
+      user_id: req.user.id,
+      openai_key_ciphertext: encryptSecret(key),
+      openai_key_last_four: key.slice(-4),
+      updated_at: new Date().toISOString(),
+    });
+    if (error) throw error;
+    res.set('Cache-Control', 'no-store');
+    res.json({ configured: true, lastFour: key.slice(-4) });
+  } catch (error) {
+    console.error(`[${req.requestId}] OpenAI key save error:`, error.message);
+    res.status(error.code === 'SERVER_CONFIGURATION_ERROR' ? 503 : 500)
+      .json({ error: 'Unable to save API key' });
+  }
+});
+
+app.delete('/api/settings/openai-key', requireAuth, async (req, res) => {
+  try {
+    const admin = requireAdminClient();
+    const { error } = await admin
+      .from('user_settings')
+      .update({
+        openai_key_ciphertext: null,
+        openai_key_last_four: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('user_id', req.user.id);
+    if (error) throw error;
+    res.status(204).send();
+  } catch (error) {
+    console.error(`[${req.requestId}] OpenAI key delete error:`, error.message);
+    res.status(error.code === 'SERVER_CONFIGURATION_ERROR' ? 503 : 500)
+      .json({ error: 'Unable to delete API key' });
+  }
+});
+
+app.get('/api/settings/openalex-key/status', requireAuth, async (req, res) => {
+  try {
+    const admin = requireAdminClient();
+    const { data, error } = await admin
+      .from('user_settings')
+      .select('openalex_key_ciphertext, openalex_key_last_four')
+      .eq('user_id', req.user.id)
+      .single();
+    if (error && error.code !== 'PGRST116') throw error;
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      configured: Boolean(data?.openalex_key_ciphertext),
+      lastFour: data?.openalex_key_last_four || null,
+    });
+  } catch (error) {
+    console.error(`[${req.requestId}] OpenAlex key status error:`, error.message);
+    res.status(error.code === 'SERVER_CONFIGURATION_ERROR' ? 503 : 500)
+      .json({ error: 'Unable to load OpenAlex key status' });
+  }
+});
+
+app.put('/api/settings/openalex-key', requireAuth, async (req, res) => {
+  const key = typeof req.body?.key === 'string' ? req.body.key.trim() : '';
+  if (!/^[A-Za-z0-9._-]{12,256}$/.test(key)) {
+    return res.status(400).json({ error: 'Enter a valid OpenAlex API key' });
+  }
+  try {
+    const admin = requireAdminClient();
+    const { error } = await admin.from('user_settings').upsert({
+      user_id: req.user.id,
+      openalex_key_ciphertext: encryptSecret(key),
+      openalex_key_last_four: key.slice(-4),
+      updated_at: new Date().toISOString(),
+    });
+    if (error) throw error;
+    res.set('Cache-Control', 'no-store');
+    res.json({ configured: true, lastFour: key.slice(-4) });
+  } catch (error) {
+    console.error(`[${req.requestId}] OpenAlex key save error:`, error.message);
+    res.status(error.code === 'SERVER_CONFIGURATION_ERROR' ? 503 : 500)
+      .json({ error: 'Unable to save OpenAlex key' });
+  }
+});
+
+app.delete('/api/settings/openalex-key', requireAuth, async (req, res) => {
+  try {
+    const admin = requireAdminClient();
+    const { error } = await admin
+      .from('user_settings')
+      .update({
+        openalex_key_ciphertext: null,
+        openalex_key_last_four: null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('user_id', req.user.id);
+    if (error) throw error;
+    res.status(204).send();
+  } catch (error) {
+    console.error(`[${req.requestId}] OpenAlex key delete error:`, error.message);
+    res.status(error.code === 'SERVER_CONFIGURATION_ERROR' ? 503 : 500)
+      .json({ error: 'Unable to delete OpenAlex key' });
+  }
+});
+
+// Retrieve User Library
+app.get('/api/library', requireAuth, async (req, res) => {
   const { data, error } = await req.supabase
     .from('user_library')
     .select('saved_at, papers(*)')
@@ -78,7 +374,8 @@ app.get('/api/library', async (req, res) => {
     .order('saved_at', { ascending: false });
 
   if (error) {
-    return res.status(500).json({ error: error.message });
+    console.error(`[${req.requestId}] Library query error:`, error.message);
+    return res.status(500).json({ error: 'Unable to load library' });
   }
 
   // Flatten structure for frontend
@@ -90,266 +387,210 @@ app.get('/api/library', async (req, res) => {
   res.json({ library });
 });
 
-// Helper function to fetch PubMed results
-const fetchPubMedResults = async (query, retmax = 20) => {
-  try {
-    const esearchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=${encodeURIComponent(query)}&retmax=${retmax}&retmode=json`;
-    const esearchRes = await limiter.schedule(() => axios.get(esearchUrl));
-    const idList = esearchRes.data.esearchresult.idlist;
-
-    if (!idList || idList.length === 0) {
-      return [];
-    }
-
-    const efetchUrl = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed&id=${idList.join(',')}&retmode=xml`;
-    const efetchRes = await limiter.schedule(() => axios.get(efetchUrl));
-    const xml = efetchRes.data;
-    const cheerioXml = cheerio.load(xml, { xmlMode: true });
-    const articles = cheerioXml('PubmedArticle');
-    const results = [];
-
-    articles.each((i, el) => {
-      const $a = cheerioXml(el);
-      const title = $a.find('ArticleTitle').text();
-      const authors = $a.find('AuthorList Author').map((i, el) => {
-        const last = cheerioXml(el).find('LastName').text();
-        const fore = cheerioXml(el).find('ForeName').text();
-        return `${fore} ${last}`.trim();
-      }).get();
-      const journal = $a.find('Journal > Title').text();
-      const pubDate = $a.find('PubDate Year').text() || $a.find('PubDate MedlineDate').text();
-      const abstract = $a.find('Abstract AbstractText').text();
-      const pmid = $a.find('PMID').text();
-
-      results.push({
-        title,
-        authors,
-        journal,
-        publication_date: pubDate,
-        abstract,
-        pmid,
-        link: `https://pubmed.ncbi.nlm.nih.gov/${pmid}/`
-      });
-    });
-
-    return results;
-  } catch (error) {
-    console.error('PubMed Fetch Error:', error.message);
-    throw error;
-  }
-};
-
-// Helper to get PubMed date range for the last month
-const getLastMonthDateRange = () => {
-  const end = new Date();
-  const start = new Date();
-  start.setMonth(start.getMonth() - 1);
-
-  const formatDate = (date) => {
-    const yyyy = date.getFullYear();
-    const mm = String(date.getMonth() + 1).padStart(2, '0');
-    const dd = String(date.getDate()).padStart(2, '0');
-    return `${yyyy}/${mm}/${dd}`;
-  };
-
-  return `${formatDate(start)}:${formatDate(end)}[dp]`;
-};
-
-// Search endpoint for PubMed
+// Search OpenAlex across titles, abstracts, and indexed full text. OpenAlex's
+// core corpus includes journal articles, conference papers, books, theses, and
+// trusted preprint repositories such as arXiv.
 app.get('/api/search', async (req, res) => {
-  const query = req.query.q;
-  if (!query) {
-    return res.status(400).json({ error: 'Missing search query' });
+  const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  if (!query || query.length > 300) {
+    return res.status(400).json({ error: 'Search query must be between 1 and 300 characters' });
   }
   try {
-    const results = await fetchPubMedResults(query);
-    res.json({ results });
+    const openAlexApiKey = await getOpenAlexKey(req.user?.id);
+    const results = await fetchOpenAlexWorks(query, { perPage: 20, apiKey: openAlexApiKey });
+    res.json({ results, source: 'OpenAlex' });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch results', details: error.message });
+    console.error(`[${req.requestId}] OpenAlex search error:`, error?.response?.status || error.message);
+    res.status(502).json({ error: 'Unable to reach the research catalog' });
   }
 });
 
 // Recommendations Endpoint
 app.get('/api/recommendations', async (req, res) => {
   try {
-    let searchTerm = `("Nature"[Journal] OR "Science"[Journal] OR "Cell"[Journal]) AND ${getLastMonthDateRange()}`;
-    let recommendationType = 'Trending Today';
+    let searchTerm = '';
+    let recommendationType = 'Noteworthy new research';
 
-    // 1. Check for Custom Keywords from Client
-    const customKeywords = req.query.keywords;
-    console.log('[DEBUG] Received Keywords:', customKeywords);
-
-    if (customKeywords && customKeywords.trim() !== '') {
-      const keywordsArray = customKeywords.split(',').map(k => k.trim()).filter(k => k !== '');
-      searchTerm = keywordsArray.join(' OR ');
-      recommendationType = `Based on your interest in "${customKeywords}"`;
+    let customKeywords = '';
+    if (req.user) {
+      const { data, error: settingsError } = await req.supabase
+        .from('user_settings')
+        .select('keywords')
+        .eq('user_id', req.user.id)
+        .maybeSingle();
+      if (settingsError) throw settingsError;
+      customKeywords = data?.keywords || '';
     }
 
-    console.log('[DEBUG] Searching PubMed for:', searchTerm);
+    if (customKeywords && customKeywords.trim() !== '') {
+      const keywordsArray = customKeywords.split(',').map(k => k.trim()).filter(Boolean).slice(0, 20);
+      searchTerm = keywordsArray.map((keyword) => keyword.includes(' ') ? `"${keyword}"` : keyword).join(' OR ');
+      recommendationType = 'Based on your research interests';
+    }
 
-    // 2. Search PubMed
-    const results = await fetchPubMedResults(searchTerm);
-    console.log('[DEBUG] Found Results:', results.length);
-    res.json({ results, type: recommendationType });
+    const openAlexApiKey = await getOpenAlexKey(req.user?.id);
+    const results = await fetchOpenAlexWorks(searchTerm, {
+      apiKey: openAlexApiKey,
+      perPage: 20,
+      fromPublicationDate: recentDate(60),
+      sort: searchTerm ? undefined : 'cited_by_count:desc',
+    });
+    res.json({ results, type: recommendationType, source: 'OpenAlex' });
 
   } catch (error) {
-    console.error('Recommendations Error:', error.message);
+    console.error('OpenAlex Recommendations Error:', error?.response?.status || error.message);
     res.status(500).json({ error: 'Failed to fetch recommendations' });
   }
 });
 
-// Endpoint to summarize article using ChatGPT, split into sections
-app.post('/api/summarize', async (req, res) => {
-  const { pmid, title, abstract, journal, authors, publication_date } = req.body;
-  if (!title && !abstract) {
-    return res.status(400).json({ error: 'Missing title or abstract for summarization' });
+// Generate an evidence-grounded paper briefing. Full text is retrieved transiently
+// and only provenance plus the derived summary are persisted.
+app.post('/api/summarize', requireAuth, aiRateLimit, async (req, res) => {
+  const requestedPaperId = String(
+    req.body?.paper_id || req.body?.pmid || req.body?.openalex_id || '',
+  );
+  if (!isSupportedPaperId(requestedPaperId)) {
+    return res.status(400).json({ error: 'A supported paper identifier is required' });
   }
 
   try {
-    // 1. Check Global Cache if PMID provided
-    if (pmid) {
-      const { data: cachedPaper } = await req.supabase
-        .from('papers')
-        .select('*')
-        .eq('pmid', pmid)
-        .single();
+    const admin = requireAdminClient();
+    const openAlexApiKey = await getOpenAlexKey(req.user.id);
+    // Treat the browser payload as an identifier only. Metadata and abstracts
+    // are resolved from OpenAlex before they can enter the shared cache.
+    const paper = await fetchOpenAlexWork(requestedPaperId, { apiKey: openAlexApiKey });
+    const paperId = paper.paper_id;
+    // 1. Check the global cache. Legacy abstract-stretched summaries have no
+    // summary_basis and are intentionally regenerated.
+    const { data: cachedPaper } = await admin
+      .from('papers')
+      .select('summary, summary_basis, summary_metadata')
+      .eq('pmid', paperId)
+      .maybeSingle();
 
-      if (cachedPaper && cachedPaper.summary) {
-        console.log(`Cache hit for ${pmid}`);
-        // If user logged in, add to library
-        if (req.user) {
-          await req.supabase.from('user_library').upsert({
-            user_id: req.user.id,
-            paper_pmid: pmid
-          }, { onConflict: 'user_id, paper_pmid' });
-        }
-        return res.json({ summary: cachedPaper.summary });
-      }
+    if (cachedPaper?.summary && cachedPaper?.summary_basis) {
+      console.log(`Cache hit for ${paperId}`);
+      await addPaperToLibrary(req.supabase, req.user.id, paperId);
+      return res.json({
+        summary: cachedPaper.summary,
+        provenance: cachedPaper.summary_metadata?.provenance || null,
+      });
     }
 
-    // 2. Fetch API Key from DB (User must be logged in)
-    if (!req.user) {
-      return res.status(401).json({ error: 'Unauthorized: Please log in to generate summaries.' });
-    }
-
-    const token = req.headers.authorization?.split(' ')[1];
-    const userSupabase = createClient(supabaseUrl, supabaseKey, {
-      global: {
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      },
-    });
-
-    const { data: userSettings } = await userSupabase
-      .from('user_settings')
-      .select('openai_key')
-      .eq('user_id', req.user.id)
-      .single();
-
-    const openaiApiKey = userSettings?.openai_key;
+    const openaiApiKey = await getOpenAIKey(req.user.id);
 
     if (!openaiApiKey) {
-      return res.status(400).json({ error: 'OpenAI API key not configured', details: 'Please add your API Key in Settings.' });
+      return res.status(400).json({ error: 'OpenAI API key not configured' });
     }
-    // Request a technical, information-dense summary
-    const prompt = `You are an expert science communicator. Your goal is to create a technical, information-dense audio summary of a research paper. 
-    
-    Guidelines:
-    - Avoid flowery language, clichés, and filler (e.g., "groundbreaking," "revolutionary," "journey of discovery").
-    - Focus heavily on the MOLECULAR/TECHNICAL METHODS and EXPLICIT RESULTS.
-    - Maintain scientific accuracy and use professional terminology.
-    - Dedicate 75% of the summary to the results and data, and 25% to background and implications.
-    - Write in a natural, spoken narrative style but prioritize density over drama.
 
-Article Details:
-Title: ${title}
-Authors: ${authors?.join(', ')}
-Journal: ${journal}
-Publication Date: ${publication_date}
-Abstract: ${abstract}`;
+    const { evidence, evidenceMap } = await prepareGroundedPaper(
+      openaiApiKey,
+      openAlexApiKey,
+      paper,
+      `summary-${req.requestId}`,
+      120_000,
+    );
+    const summary = await generateGroundedBriefing(
+      openaiApiKey,
+      paper,
+      evidence,
+      evidenceMap,
+      `summary-${req.requestId}`,
+    );
+    if (!summary) throw new Error('The summary model returned no content');
 
-    const response = await axios.post('https://api.openai.com/v1/chat/completions', {
-      model: 'gpt-4o',
-      messages: [
-        { role: 'system', content: 'You are an expert science communicator who creates engaging, narrative-driven summaries of research papers for audio consumption.' },
-        { role: 'user', content: prompt }
-      ],
-      max_tokens: 8192
-    }, {
-      headers: {
-        'Authorization': `Bearer ${openaiApiKey}`,
-        'Content-Type': 'application/json'
-      }
-    });
-    let summary = response.data.choices?.[0]?.message?.content || '';
-    // Limit to 30000 characters for longer narrative summaries (~15 min audio)
-    // if (summary.length > 30000) {
-    //   summary = summary.slice(0, 30000);
-    // }
+    const provenance = buildSummaryProvenance(evidence, evidenceMap, summary);
+    const summaryFingerprint = crypto.createHash('sha256').update(summary).digest('hex');
 
     // 2. Persist to Global Papers
-    if (pmid) {
-      const { error: upsertError } = await req.supabase.from('papers').upsert({
-        pmid,
-        title,
-        authors,
-        journal,
-        publication_date,
-        abstract,
-        summary
+    if (paperId) {
+      const { error: upsertError } = await admin.from('papers').upsert({
+        pmid: paperId,
+        openalex_id: paper.openalex_id,
+        pubmed_id: paper.pubmed_id,
+        doi: paper.doi,
+        title: paper.title,
+        authors: paper.authors,
+        journal: paper.journal,
+        publication_date: paper.publication_date,
+        abstract: paper.abstract,
+        summary,
+        summary_basis: evidence.basis,
+        summary_metadata: { provenance },
+        summary_fingerprint: summaryFingerprint,
+        content_status: evidence.contentStatus,
+        content_source: evidence.source,
+        content_url: evidence.sourceUrl,
+        content_license: evidence.license,
+        content_version: evidence.version,
+        content_retrieved_at: new Date().toISOString(),
+        work_type: paper.work_type,
+        source_type: paper.source_type,
+        primary_topic: paper.primary_topic,
+        audio_path: null,
       }, { onConflict: 'pmid' });
 
       if (upsertError) console.error('Supabase upsert error:', upsertError);
 
-      // 3. Add to User Library if logged in
-      if (req.user) {
-        await req.supabase.from('user_library').upsert({
-          user_id: req.user.id,
-          paper_pmid: pmid
-        }, { onConflict: 'user_id, paper_pmid' });
-      }
+      await addPaperToLibrary(req.supabase, req.user.id, paperId);
     }
 
-    res.json({ summary });
+    res.json({ summary, provenance });
   } catch (error) {
-    console.error('Summary generation error:', error?.response?.data || error.message);
-    const status = error?.response?.status || 500;
-    res.status(status).json({ error: 'Failed to generate summary', details: error?.response?.data || error.message });
+    console.error(`[${req.requestId}] Summary generation error:`, error?.response?.status || error.message);
+    const status = error.code === 'SERVER_CONFIGURATION_ERROR' ? 503
+      : error.code === 'INVALID_PAPER_ID' ? 400
+        : error.code === 'PAPER_NOT_FOUND' || error.code === 'UNSUPPORTED_WORK' ? 422
+      : error.code === 'INSUFFICIENT_EVIDENCE' ? 422
+        : error?.response?.status === 429 ? 429 : 502;
+    const message = error.code === 'PAPER_NOT_FOUND' || error.code === 'UNSUPPORTED_WORK'
+      ? 'This paper could not be verified in the research catalog.'
+      : error.code === 'INSUFFICIENT_EVIDENCE'
+        ? 'There was not enough verifiable source material to create a reliable summary.'
+        : 'Failed to generate summary';
+    res.status(status).json({ error: message });
   }
 });
 
 // Endpoint to convert summary to speech using OpenAI TTS
-app.post('/api/tts', async (req, res) => {
-  const { summary, pmid } = req.body;
-  console.log(`[TTS] Request received for PMID: ${pmid || 'none'}. Summary length: ${summary?.length || 0}`);
+app.post('/api/tts', requireAuth, aiRateLimit, async (req, res) => {
+  const paperId = String(req.body?.paper_id || req.body?.pmid || '');
+  console.log(`[TTS] Request received for paper: ${paperId || 'none'}.`);
 
-  if (!summary) {
-    return res.status(400).json({ error: 'Missing summary text for TTS' });
+  if (!isSupportedPaperId(paperId)) {
+    return res.status(400).json({ error: 'A supported paper identifier is required' });
   }
   try {
-    // 1. Check if audio already exists in DB
-    if (pmid) {
-      const { data: paper } = await req.supabase
-        .from('papers')
-        .select('audio_path')
-        .eq('pmid', pmid)
-        .single();
+    const admin = requireAdminClient();
+    // The persistent audio cache is derived only from a server-stored summary.
+    // Caller-provided text is intentionally ignored to prevent cache poisoning.
+    const { data: paper, error: paperError } = await admin
+      .from('papers')
+      .select('summary, summary_fingerprint, audio_path')
+      .eq('pmid', paperId)
+      .maybeSingle();
+    if (paperError) throw paperError;
+    if (!paper?.summary || !paper.summary_fingerprint) {
+      return res.status(409).json({ error: 'Generate a grounded summary before requesting audio' });
+    }
+    const summary = paper.summary;
+    if (summary.length > 40_000) {
+      return res.status(422).json({ error: 'Stored summary is too long for audio generation' });
+    }
 
-      if (paper && paper.audio_path) {
-        console.log(`Audio Cache hit for ${pmid}`);
-        const { data: fileData, error: downloadError } = await req.supabase.storage
-          .from('audio-summaries')
-          .download(paper.audio_path);
+    if (paper.audio_path) {
+      console.log(`Audio Cache hit for ${paperId}`);
+      const { data: fileData, error: downloadError } = await admin.storage
+        .from('audio-summaries')
+        .download(paper.audio_path);
 
-        if (!downloadError && fileData) {
-          const buffer = Buffer.from(await fileData.arrayBuffer());
-          res.set({
-            'Content-Type': 'audio/mpeg',
-            'Content-Disposition': 'inline; filename="summary.mp3"'
-          });
-          return res.send(buffer);
-        }
+      if (!downloadError && fileData) {
+        const buffer = Buffer.from(await fileData.arrayBuffer());
+        res.set({
+          'Content-Type': 'audio/mpeg',
+          'Content-Disposition': 'inline; filename="summary.mp3"'
+        });
+        return res.send(buffer);
       }
     }
 
@@ -360,22 +601,12 @@ app.post('/api/tts', async (req, res) => {
       chunks.push(summary.slice(i, i + chunkSize));
     }
 
-    console.log(`[TTS] Generating audio for ${pmid || 'unsaved paper'} in ${chunks.length} chunks...`);
+    console.log(`[TTS] Generating audio for ${paperId || 'unsaved paper'} in ${chunks.length} chunks...`);
 
-    if (!req.user) {
-      return res.status(401).json({ error: 'Unauthorized: Please log in to generate audio.' });
-    }
-
-    const { data: userSettings } = await req.supabase
-      .from('user_settings')
-      .select('openai_key')
-      .eq('user_id', req.user.id)
-      .single();
-
-    const openaiApiKey = userSettings?.openai_key;
+    const openaiApiKey = await getOpenAIKey(req.user.id);
 
     if (!openaiApiKey) {
-      return res.status(400).json({ error: 'OpenAI API key not configured', details: 'Please add your API Key in Settings.' });
+      return res.status(400).json({ error: 'OpenAI API key not configured' });
     }
     const audioBuffers = [];
     for (const chunk of chunks) {
@@ -388,36 +619,37 @@ app.post('/api/tts', async (req, res) => {
       }, {
         headers: {
           'Authorization': `Bearer ${openaiApiKey}`,
-          'Content-Type': 'application/json'
+          'Content-Type': 'application/json',
+          'X-Client-Request-Id': req.requestId,
         },
-        responseType: 'arraybuffer'
+        responseType: 'arraybuffer',
+        timeout: 90_000,
       });
       audioBuffers.push(Buffer.from(ttsRes.data));
     }
     const stitchedAudio = Buffer.concat(audioBuffers);
 
-    // 2. Upload to Supabase Storage and Update DB if PMID exists
-    if (pmid) {
-      const fileName = `${pmid}_${Date.now()}.mp3`;
-      console.log(`[TTS] Uploading ${fileName} to storage (using user auth)...`);
-      const { error: uploadError } = await req.supabase.storage
-        .from('audio-summaries')
-        .upload(fileName, stitchedAudio, {
-          contentType: 'audio/mpeg',
-          upsert: true
-        });
+    // 2. Upload to Supabase Storage and update the cached paper when identified.
+    const fileName = `${paperId}_${paper.summary_fingerprint.slice(0, 20)}.mp3`;
+    console.log(`[TTS] Uploading ${fileName} to private storage...`);
+    const { error: uploadError } = await admin.storage
+      .from('audio-summaries')
+      .upload(fileName, stitchedAudio, {
+        contentType: 'audio/mpeg',
+        upsert: true
+      });
 
-      if (!uploadError) {
-        console.log(`[TTS] Successfully uploaded ${fileName}. Updating papers table...`);
-        // Use user's req.supabase to update the papers table
-        const { error: updateError } = await req.supabase
-          .from('papers')
-          .upsert({ pmid, audio_path: fileName }, { onConflict: 'pmid' });
+    if (uploadError) throw uploadError;
+    console.log(`[TTS] Successfully uploaded ${fileName}. Updating papers table...`);
+    const { error: updateError } = await admin
+      .from('papers')
+      .update({ audio_path: fileName })
+      .eq('pmid', paperId)
+      .eq('summary_fingerprint', paper.summary_fingerprint);
 
-        if (updateError) console.error('[TTS] Error updating papers table:', updateError.message);
-      } else {
-        console.error('[TTS] Storage upload error:', uploadError);
-      }
+    if (updateError) {
+      console.error('[TTS] Error updating papers table:', updateError.message);
+      throw updateError;
     }
 
     res.set({
@@ -427,17 +659,15 @@ app.post('/api/tts', async (req, res) => {
     console.log(`[TTS] Sending ${stitchedAudio.length} bytes of audio back to client.`);
     res.send(stitchedAudio);
   } catch (error) {
-    console.error('TTS error:', error?.response?.data || error.message);
-    res.status(500).json({ error: 'Failed to generate TTS audio', details: error?.response?.data || error.message });
+    console.error(`[${req.requestId}] TTS error:`, error?.response?.status || error.message);
+    const status = error.code === 'SERVER_CONFIGURATION_ERROR' ? 503
+      : error?.response?.status === 429 ? 429 : 502;
+    res.status(status).json({ error: 'Failed to generate TTS audio' });
   }
 });
 
 // Endpoint to fetch user's briefing history
-app.get('/api/briefings/history', async (req, res) => {
-  if (!req.user) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
+app.get('/api/briefings/history', requireAuth, async (req, res) => {
   try {
     const { data: briefings, error } = await req.supabase
       .from('daily_podcasts')
@@ -457,12 +687,14 @@ app.get('/api/briefings/history', async (req, res) => {
     // OR we generate them here if the token lifespan is long enough. 
     // Let's generate them here for simplicity as we do in single-fetch.
 
-    const briefingsWithUrls = await Promise.all(briefings.map(async (b) => {
+    const admin = requireAdminClient();
+    const briefingsWithUrls = await Promise.all(briefings.map(async (briefing) => {
+      const b = await recoverStaleBriefing(admin, briefing);
       let audio_url = null;
       if (b.audio_path) {
         const { data } = await req.supabase.storage
           .from('daily-podcasts')
-          .createSignedUrl(b.audio_path, 3600 * 24); // 24 hours
+          .createSignedUrl(b.audio_path, 3600);
         audio_url = data?.signedUrl;
       }
       return { ...b, audio_url };
@@ -476,142 +708,171 @@ app.get('/api/briefings/history', async (req, res) => {
 });
 
 
-// Endpoint to get or generate the Daily Podcast
-// Helper to generate daily podcast
-const generateDailyPodcast = async (userId, supabaseClient, userDate = null) => {
+// Generate an on-demand or automatically scheduled research briefing.
+const generateResearchBriefing = async (userId, supabaseClient, userDate = null) => {
   const today = userDate || new Date().toISOString().split('T')[0];
-  console.log('Generating Daily Podcast for user:', userId, 'Date:', today);
+  console.log('Generating research briefing for user:', userId, 'Date:', today);
 
   try {
     // 1. Fetch User Interests from Library
-    const { data: libraryData } = await supabaseClient
-      .from('user_library')
-      .select('papers(title, abstract)')
-      .eq('user_id', userId)
-      .order('saved_at', { ascending: false })
-      .limit(20);
+    const [libraryResult, settingsResult] = await Promise.all([
+      supabaseClient
+        .from('user_library')
+        .select('papers(title, abstract)')
+        .eq('user_id', userId)
+        .order('saved_at', { ascending: false })
+        .limit(20),
+      supabaseClient
+        .from('user_settings')
+        .select('keywords')
+        .eq('user_id', userId)
+        .maybeSingle(),
+    ]);
+    if (libraryResult.error) throw libraryResult.error;
+    if (settingsResult.error) throw settingsResult.error;
 
-    const interests = libraryData?.map(i => i.papers?.title).join('\n') || '';
+    const recentTitles = (libraryResult.data || [])
+      .map((item) => item.papers?.title)
+      .filter(Boolean);
+    const researchInterests = String(settingsResult.data?.keywords || '').trim();
+    const searchQueries = buildBriefingQueries({
+      keywords: researchInterests,
+      recentTitles,
+    });
+    if (searchQueries.length === 0) {
+      throw new Error('Add research interests or save a paper before generating a briefing.');
+    }
 
-    // 2. Fetch API Key
-    const { data: userSettings } = await supabaseClient
-      .from('user_settings')
-      .select('openai_key')
-      .eq('user_id', userId)
-      .single();
-
-    const openaiApiKey = userSettings?.openai_key;
+    // 2. Fetch and decrypt the user's API key on the trusted server only.
+    const openaiApiKey = await getOpenAIKey(userId);
     if (!openaiApiKey) {
       throw new Error('OpenAI API key required for podcast generation');
     }
+    const openAlexApiKey = await getOpenAlexKey(userId);
 
-    // 3. Generate Search Terms
-    const termRes = await axios.post('https://api.openai.com/v1/chat/completions', {
-      model: 'gpt-4o',
-      messages: [
-        { role: 'system', content: 'You are a research assistant. Generate 3 specific, compound search terms for PubMed based on the user\'s recent paper titles. The terms should be related but distinct from the exact titles to find new, adjacent research. Return ONLY the 3 terms separated by OR.' },
-        { role: 'user', content: `User's recent papers:\n${interests || 'Trending Today'}` }
-      ],
-      temperature: 0.9
-    }, { headers: { 'Authorization': `Bearer ${openaiApiKey}` } });
-
-    const searchTerms = termRes.data.choices[0].message.content;
-    const fullQuery = `(${searchTerms}) AND ${getLastMonthDateRange()}`;
-
-    // 4. Search PubMed
-    const papers = await fetchPubMedResults(fullQuery, 3); // Fetch top 3 papers
+    // 3. Search each user-authored interest independently. If a very recent
+    // window is sparse, widen it in bounded steps rather than failing the job.
+    const discovery = await fetchBriefingCandidates(searchQueries, {
+      apiKey: openAlexApiKey,
+      maxResults: 3,
+      perQuery: 2,
+    });
+    const papers = discovery.papers;
+    console.log(`[Research Briefing] Discovery found ${papers.length} candidates across ${searchQueries.length} interests using a ${discovery.lookbackDays}-day window.`);
 
     if (papers.length === 0) {
-      throw new Error('No new papers found for daily podcast today.');
+      throw new Error('No recent papers with abstracts matched the saved research interests.');
     }
 
-    const papersText = papers.map((p, i) => `Paper ${i + 1} [PMID: ${p.pmid}]: ${p.title} by ${p.authors.slice(0, 2).join(', ')}. Abstract:\n${p.abstract}`).join('\n\n');
+    const groundedPapers = [];
+    for (const paper of papers) {
+      console.log(`[Research Briefing] Preparing evidence for paper ${paper.paper_id}...`);
+      try {
+        const { evidence, evidenceMap } = await prepareGroundedPaper(
+          openaiApiKey,
+          openAlexApiKey,
+          paper,
+          `podcast-${userId}-${today}-${paper.paper_id}`,
+          55_000,
+        );
+        groundedPapers.push({ paper, evidence, evidenceMap });
+      } catch (error) {
+        console.warn(`[Research Briefing] Skipping paper ${paper.paper_id}: ${error.message}`);
+      }
+    }
+
+    if (groundedPapers.length === 0) {
+      throw new Error('No papers had enough verifiable evidence for this briefing.');
+    }
+
+    const paperPackets = groundedPapers.map(({ paper, evidence, evidenceMap }) => ({
+      paper_id: paper.paper_id,
+      openalex_id: paper.openalex_id,
+      title: paper.title,
+      authors: paper.authors?.slice(0, 4) || [],
+      journal: paper.journal,
+      publication_date: paper.publication_date,
+      work_type: paper.work_type,
+      source_type: paper.source_type,
+      primary_topic: paper.primary_topic,
+      evidence_basis: evidence.basis,
+      manuscript_version: evidence.version,
+      content_source: evidence.source,
+      content_license: evidence.license,
+      evidence_warning: evidence.warning,
+      evidence: evidenceMap,
+    }));
+    const targetTotalWords = Math.max(600, Math.min(2_200,
+      220 + groundedPapers.reduce((total, item) => total + Math.min(
+        item.evidence.basis === 'full_text' ? 650 : 240,
+        getSummaryTargetWords(item.evidence, item.evidenceMap),
+      ), 0)));
 
     // --- HIERARCHICAL GENERATION START ---
 
     // 5a. Step 1: Generate Outline
-    console.log('[Daily Podcast] Generating Outline...');
+    console.log('[Research Briefing] Generating outline...');
     const outlineRes = await axios.post('https://api.openai.com/v1/chat/completions', {
-      model: 'gpt-4o',
-      messages: [
-        {
-          role: 'system',
-          content: `You are a professional research analyst and podcast producer. Create a detailed outline for a 12-15 minute technical research briefing. 
-          
-          Guidelines:
-          - The podcast should have a total of 12-15 minutes of content (~1800-2200 words).
-          - Structure: 1 Short Intro section, 3-5 Technical Deep Dive sections (mapping to the 3 papers), and 1 Wrap-up section.
-          - Style: Very informative, technical, and dense. Avoid flowery language and filler.
-          - Each Technical section must specify which paper it focuses on.
-          
-          Return valid JSON with:
-          1. "title": A professional, descriptive title (avoid clickbait).
-          2. "summary": A concise 2-sentence overview of the briefing's focus.
-          3. "sections": Array of objects:
-             { 
-               "id": number, 
-               "topic": string, 
-               "focus_paper_pmids": string[], // PMIDs of papers discussed in this section
-               "target_word_count": number, // Target word count for this section
-               "key_points": string[] // Specific technical points (methods, data points, conclusions)
-             }`
-        },
-        {
-          role: 'user',
-          content: `Here are the papers to cover:\n\n${papersText}`
-        }
-      ],
-      response_format: { type: "json_object" }
-    }, { headers: { 'Authorization': `Bearer ${openaiApiKey}` } });
+      model: SUMMARY_MODEL,
+      messages: buildResearchBriefingOutlineMessages({
+        paperPackets,
+        researchInterests,
+        targetTotalWords,
+      }),
+      response_format: RESEARCH_BRIEFING_OUTLINE_RESPONSE_FORMAT,
+      temperature: 0,
+    }, openAIRequestConfig(openaiApiKey, `podcast-outline-${userId}-${today}`));
 
-    const outlineData = JSON.parse(outlineRes.data.choices[0].message.content);
+    const outlineData = normalizeResearchBriefingOutline(
+      JSON.parse(outlineRes.data.choices[0].message.content),
+      paperPackets,
+    );
 
     // 5b. Step 2: Generate Script Section by Section
     let fullScript = "";
-    let coveredPaperPmids = new Set();
+    const coveredPaperTitles = new Set();
 
     for (const section of outlineData.sections) {
-      console.log(`[Daily Podcast] Generating Section ${section.id}: ${section.topic}`);
+      console.log(`[Research Briefing] Generating section ${section.id}: ${section.topic}`);
 
-      const focusPapers = papers.filter(p => section.focus_paper_pmids?.includes(p.pmid));
+      const focusPapers = groundedPapers.filter(({ paper }) => section.focus_paper_ids?.includes(paper.paper_id));
+      const sectionPackets = (focusPapers.length > 0 ? focusPapers : groundedPapers).map(({ paper, evidence, evidenceMap }) => ({
+        paper_id: paper.paper_id,
+        openalex_id: paper.openalex_id,
+        title: paper.title,
+        authors: paper.authors?.slice(0, 4) || [],
+        journal: paper.journal,
+        publication_date: paper.publication_date,
+        work_type: paper.work_type,
+        source_type: paper.source_type,
+        primary_topic: paper.primary_topic,
+        evidence_basis: evidence.basis,
+        manuscript_version: evidence.version,
+        content_source: evidence.source,
+        content_license: evidence.license,
+        evidence_warning: evidence.warning,
+        evidence: evidenceMap,
+      }));
 
       const sectionRes = await axios.post('https://api.openai.com/v1/chat/completions', {
-        model: 'gpt-4o',
-        messages: [
-          {
-            role: 'system',
-            content: `You are a professional science narrator. Your style is direct, informative, and technical. 
-            
-            CRITICAL RULES:
-            - NO flowery language (e.g., "Groundbreaking," "Revolutionary," "Deep dive," "Incredible journey").
-            - NO repetitive transition phrases (e.g., "Now let's look at," "Moving on to"). 
-            - Focus HEAVILY on METHODS and RESULTS for technical sections. Describe HOW the study was done and EXPLICITLY what was found.
-            - Write in a natural spoken tone but with high information density.
-            - Do NOT repeat information already covered in previous sections.
-            - Do NOT re-introduce papers that have already been discussed unless adding new information.
-            - Use the target word count provided.`
-          },
-          {
-            role: 'user',
-            content: `Current Section Focus: ${section.topic}
-            Target Word Count: ${section.target_word_count}
-            Key Points for this section: ${section.key_points.join(', ')}
-            
-            Papers TO FOCUS ON in this section:
-            ${focusPapers.map(p => `[PMID: ${p.pmid}] ${p.title}\n${p.abstract}`).join('\n\n')}
-            
-            Context (Already Covered Papers): ${Array.from(coveredPaperPmids).join(', ') || 'None'}
-            
-            Task: Write a ${section.target_word_count}-word script for this section of the podcast. Ensure it flows naturally from the previous section if applicable, but do not waste words on pleasantries. Detail the methodologies and specific results.`
-          }
-        ]
-      }, { headers: { 'Authorization': `Bearer ${openaiApiKey}` } });
+        model: SUMMARY_MODEL,
+        messages: buildResearchBriefingSectionMessages({
+          section,
+          sectionPackets,
+          researchInterests,
+          coveredPaperTitles: Array.from(coveredPaperTitles),
+          paperCount: groundedPapers.length,
+        }),
+        temperature: 0.1,
+      }, openAIRequestConfig(openaiApiKey, `podcast-section-${userId}-${today}-${section.id}`));
 
       const sectionText = sectionRes.data.choices[0].message.content;
       fullScript += sectionText + "\n\n";
 
       // Track covered papers
-      section.focus_paper_pmids?.forEach(pmid => coveredPaperPmids.add(pmid));
+      if (section.kind === 'paper') {
+        focusPapers.forEach(({ paper }) => coveredPaperTitles.add(paper.title));
+      }
     }
 
     const transcript = fullScript;
@@ -622,41 +883,48 @@ const generateDailyPodcast = async (userId, supabaseClient, userDate = null) => 
     }
 
     const audioBuffers = [];
-    console.log(`[Daily Podcast] Generating Audio chunk by chunk...`);
+    console.log('[Research Briefing] Generating audio chunk by chunk...');
     for (const chunk of chunks) {
       const ttsRes = await axios.post('https://api.openai.com/v1/audio/speech', {
         model: 'tts-1',
         input: chunk,
         voice: 'echo',
         response_format: 'mp3'
-      }, {
-        headers: { 'Authorization': `Bearer ${openaiApiKey}` },
-        responseType: 'arraybuffer'
-      });
+      }, openAIRequestConfig(openaiApiKey, `podcast-audio-${userId}-${today}`, {
+        responseType: 'arraybuffer',
+      }));
       audioBuffers.push(Buffer.from(ttsRes.data));
     }
     const finalAudio = Buffer.concat(audioBuffers);
-    const fileName = `daily_${userId}_${today}.mp3`;
+    const fileName = `${userId}/${today}/briefing.mp3`;
 
-    console.log(`[Daily Podcast] Uploading audio to storage bucket...`);
-    const { error: uploadError } = await supabaseClient.storage
+    console.log('[Research Briefing] Uploading audio to storage...');
+    const { error: uploadError } = await requireAdminClient().storage
       .from('daily-podcasts')
       .upload(fileName, finalAudio, { contentType: 'audio/mpeg', upsert: true });
 
     if (uploadError) throw uploadError;
 
-    console.log(`[Daily Podcast] Inserting podcast metadata into DB...`);
+    console.log('[Research Briefing] Saving briefing metadata...');
     const { data: newPodcast, error: insertError } = await supabaseClient
       .from('daily_podcasts')
       .upsert({
         user_id: userId,
         date: today,
-        title: outlineData.title || `Daily Research Update: ${today}`,
+        title: outlineData.title || `Research Briefing: ${today}`,
         summary: outlineData.summary,
         transcript: transcript,
         audio_path: fileName,
-        paper_ids: papers.map(p => p.pmid),
-        papers_metadata: papers,
+        paper_ids: groundedPapers.map(({ paper }) => paper.paper_id),
+        papers_metadata: groundedPapers.map(({ paper, evidence, evidenceMap }) => {
+          const contentProvenance = { ...buildSummaryProvenance(evidence, evidenceMap, '') };
+          delete contentProvenance.word_count;
+          delete contentProvenance.estimated_minutes;
+          return {
+            ...paper,
+            summary_provenance: contentProvenance,
+          };
+        }),
         status: 'completed'
       }, { onConflict: 'user_id, date' })
       .select()
@@ -667,43 +935,43 @@ const generateDailyPodcast = async (userId, supabaseClient, userDate = null) => 
 
   } catch (error) {
     console.error('Generation Job Error:', error.message);
-    await supabaseClient
-      .from('daily_podcasts')
-      .upsert({
-        user_id: userId,
-        date: today,
-        status: 'failed',
-        summary: `Error: ${error.message}`
-      }, { onConflict: 'user_id, date' });
+    try {
+      await markBriefingFailed(supabaseClient, userId, today);
+    } catch (recoveryError) {
+      console.error('Could not persist failed briefing status:', recoveryError.message);
+    }
     throw error;
   }
 };
 
-// Endpoint to CHECK for Daily Podcast
-app.get('/api/daily-podcast', async (req, res) => {
-  if (!req.user) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
+// Return a requested briefing date, or the user's latest briefing when no date is supplied.
+app.get('/api/daily-podcast', requireAuth, async (req, res) => {
   try {
-    const queryDate = req.query.date || new Date().toISOString().split('T')[0];
-    const { data: existingPodcast } = await req.supabase
+    const queryDate = req.query.date;
+    if (queryDate && !isIsoDate(queryDate)) return res.status(400).json({ error: 'Invalid date' });
+    let briefingQuery = req.supabase
       .from('daily_podcasts')
       .select('*')
-      .eq('user_id', req.user.id)
-      .eq('date', queryDate)
-      .single();
+      .eq('user_id', req.user.id);
 
-    if (existingPodcast) {
+    briefingQuery = queryDate
+      ? briefingQuery.eq('date', queryDate)
+      : briefingQuery.order('date', { ascending: false }).limit(1);
+
+    const { data: queriedPodcast, error: queryError } = await briefingQuery.maybeSingle();
+    if (queryError) throw queryError;
+
+    if (queriedPodcast) {
+      const existingPodcast = await recoverStaleBriefing(requireAdminClient(), queriedPodcast);
       let audio_url = null;
       if (existingPodcast.audio_path) {
-        console.log(`[GET /api/daily-podcast] Cache hit: serving audio for ${queryDate}`);
+        console.log(`[Research Briefing] Cache hit: serving audio for ${existingPodcast.date}`);
         const { data: signedUrlData } = await req.supabase.storage
           .from('daily-podcasts')
-          .createSignedUrl(existingPodcast.audio_path, 3600 * 24);
+          .createSignedUrl(existingPodcast.audio_path, 3600);
         audio_url = signedUrlData?.signedUrl;
       } else {
-        console.log(`[GET /api/daily-podcast] Polling status: ${existingPodcast.status} for ${queryDate}`);
+        console.log(`[Research Briefing] Polling status: ${existingPodcast.status} for ${existingPodcast.date}`);
       }
 
       return res.json({
@@ -712,104 +980,181 @@ app.get('/api/daily-podcast', async (req, res) => {
       });
     }
 
-    // New Behavior: Return 404 explicitly to trigger "Generate" button UI
-    res.status(404).json({ error: 'Daily briefing not yet generated for today.', code: 'not_generated' });
+    res.status(404).json({ error: 'No research briefing has been generated yet.', code: 'not_generated' });
   } catch (error) {
-    console.error('Daily Podcast Check Error:', error.message);
-    res.status(500).json({ error: 'Failed to check daily podcast status' });
+    console.error('Research Briefing Check Error:', error.message);
+    res.status(500).json({ error: 'Failed to check research briefing status' });
   }
 });
 
-// Endpoint to GENERATE Daily Podcast explicitly
-app.post('/api/daily-podcast/generate', async (req, res) => {
-  if (!req.user) {
-    return res.status(401).json({ error: 'Unauthorized' });
-  }
-
+// Generate a research briefing explicitly. Manual generation is available at every cadence.
+app.post('/api/daily-podcast/generate', requireAuth, aiRateLimit, async (req, res) => {
   const { date } = req.body;
-  if (!date) {
-    return res.status(400).json({ error: 'Missing date' });
+  if (!isIsoDate(date)) {
+    return res.status(400).json({ error: 'A valid date is required' });
   }
 
   try {
-    // 1. Create/Update a 'generating' row
-    const { data: placeholder, error } = await req.supabase
+    const admin = requireAdminClient();
+    const { data: existing, error: existingError } = await admin
+      .from('daily_podcasts')
+      .select('*')
+      .eq('user_id', req.user.id)
+      .eq('date', date)
+      .maybeSingle();
+
+    if (existingError) throw existingError;
+
+    if (existing?.status === 'completed') return res.json(existing);
+    if (existing?.status === 'generating') {
+      if (!isBriefingStale(existing)) {
+        return res.status(409).json({ error: 'Briefing generation is already in progress', podcast: existing });
+      }
+      await markBriefingFailed(admin, req.user.id, date);
+    }
+
+    const { data: placeholder, error } = await admin
       .from('daily_podcasts')
       .upsert({
         user_id: req.user.id,
         date: date,
         status: 'generating',
         title: 'Generating Briefing...',
-        summary: 'We are curating your personalized research update. This usually takes a few minutes.'
+        summary: 'We are curating your personalized research update. This usually takes a few minutes.',
+        created_at: new Date().toISOString(),
       }, { onConflict: 'user_id, date' })
       .select()
       .single();
 
+    if (error?.code === '23505') {
+      return res.status(409).json({ error: 'Briefing generation is already in progress' });
+    }
     if (error) throw error;
 
     // 2. Start generation in background (DO NOT AWAIT)
-    generateDailyPodcast(req.user.id, req.supabase, date)
+    generateResearchBriefing(req.user.id, admin, date)
       .then(() => console.log(`Background generation success for ${req.user.id}`))
       .catch(err => console.error(`Background generation failure for ${req.user.id}:`, err));
 
     // 3. Return the placeholder immediately
-    res.json(placeholder);
+    res.status(202).json(placeholder);
   } catch (error) {
-    console.error('Daily Podcast Generation Init Error:', error.message);
-    res.status(500).json({ error: error.message || 'Failed to initialize daily podcast' });
+    console.error(`[${req.requestId}] Research Briefing Generation Init Error:`, error.message);
+    res.status(error.code === 'SERVER_CONFIGURATION_ERROR' ? 503 : 500)
+      .json({ error: 'Failed to initialize research briefing' });
   }
 });
 
-// Scheduler for 6 AM Briefings
-setInterval(async () => {
-  const now = new Date();
-  // Check if it's 6:00 AM (Server Time)
-  if (now.getHours() === 6 && now.getMinutes() === 0) {
-    console.log('[Scheduler] Running 6 AM Briefing Generation...');
+const processedSchedulerDates = new Map();
 
-    // Fetch users who have enabled briefings
-    const { data: users, error } = await supabase
-      .from('user_settings')
-      .select('user_id')
-      .eq('briefing_enabled', true);
+async function runScheduledResearchBriefings(now, client) {
+  const { data: users, error } = await client
+    .from('user_settings')
+    .select('user_id, briefing_cadence, briefing_timezone, briefing_time, briefing_weekday, briefing_enabled')
+    .neq('briefing_cadence', 'off');
 
-    if (error) {
-      console.error('[Scheduler] Failed to fetch settings:', error);
-      return;
+  if (error) throw error;
+
+  for (const user of users || []) {
+    const localSchedule = getZonedDateTime(now, user.briefing_timezone);
+    if (!shouldRunSchedulerForUser({
+      now,
+      timezone: localSchedule.timezone,
+      cadence: user.briefing_cadence,
+      scheduledTime: user.briefing_time,
+      scheduledWeekday: user.briefing_weekday,
+      lastRunDate: processedSchedulerDates.get(user.user_id),
+    })) continue;
+
+    const today = localSchedule.date;
+    const cadence = normalizeBriefingCadence(user.briefing_cadence, user.briefing_enabled);
+    const { data: latest, error: latestError } = await client
+      .from('daily_podcasts')
+      .select('date, status, created_at')
+      .eq('user_id', user.user_id)
+      .in('status', ['completed', 'generating'])
+      .order('date', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (latestError) {
+      console.error(`[Scheduler] Could not read latest briefing for ${user.user_id}:`, latestError.message);
+      continue;
     }
-
-    if (users && users.length > 0) {
-      console.log(`[Scheduler] Found ${users.length} users with briefings enabled.`);
-      const today = new Date().toISOString().split('T')[0];
-
-      for (const user of users) {
-        // Check if already generated today
-        const { data: existing } = await supabase
-          .from('daily_podcasts')
-          .select('id')
-          .eq('user_id', user.user_id)
-          .eq('date', today)
-          .single();
-
-        if (!existing) {
-          try {
-            console.log(`[Scheduler] Generating for user ${user.user_id}...`);
-            // Note: using global 'supabase' client. Ensure SUPABASE_KEY is service_role or RLS allows this.
-            await generateDailyPodcast(user.user_id, supabase);
-            console.log(`[Scheduler] Success for user ${user.user_id}`);
-          } catch (e) {
-            console.error(`[Scheduler] Failed for user ${user.user_id}:`, e.message);
-          }
-        } else {
-          console.log(`[Scheduler] Already exists for user ${user.user_id}`);
-        }
+    let latestDate = latest?.date;
+    if (latest && isBriefingStale(latest, now)) {
+      try {
+        await markBriefingFailed(client, user.user_id, latest.date);
+        latestDate = null;
+      } catch (staleError) {
+        console.error(`[Scheduler] Could not recover stale briefing for ${user.user_id}:`, staleError.message);
+        continue;
       }
-    } else {
-      console.log('[Scheduler] No users have briefings enabled.');
+    }
+    if (!shouldGenerateScheduledBriefing({ cadence, latestDate, today })) {
+      processedSchedulerDates.set(user.user_id, today);
+      continue;
+    }
+
+    const { error: claimError } = await client
+      .from('daily_podcasts')
+      .insert({
+        user_id: user.user_id,
+        date: today,
+        status: 'generating',
+        title: 'Generating Research Briefing...',
+        summary: 'We are curating your personalized research update. This usually takes a few minutes.',
+      });
+
+    if (claimError?.code === '23505') {
+      processedSchedulerDates.set(user.user_id, today);
+      continue;
+    }
+    if (claimError) {
+      console.error(`[Scheduler] Could not claim briefing for ${user.user_id}:`, claimError.message);
+      continue;
+    }
+
+    try {
+      console.log(`[Scheduler] Generating ${cadence} research briefing for ${user.user_id} at ${user.briefing_time} ${localSchedule.timezone}...`);
+      await generateResearchBriefing(user.user_id, client, today);
+      console.log(`[Scheduler] Research briefing completed for ${user.user_id}`);
+    } catch (error) {
+      console.error(`[Scheduler] Research briefing failed for ${user.user_id}:`, error.message);
+    } finally {
+      processedSchedulerDates.set(user.user_id, today);
     }
   }
-}, 60000); // Check every minute
+}
 
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+let schedulerInProgress = false;
+
+async function researchBriefingSchedulerTick(now = new Date()) {
+  if (!adminClient || schedulerInProgress) return;
+  schedulerInProgress = true;
+  try {
+    await runScheduledResearchBriefings(now, adminClient);
+  } catch (error) {
+    console.error('[Scheduler] Failed to run research briefing schedule:', error.message);
+  } finally {
+    schedulerInProgress = false;
+  }
+}
+
+if (process.env.ENABLE_SCHEDULER === 'true' && adminClient) {
+  researchBriefingSchedulerTick();
+  setInterval(researchBriefingSchedulerTick, 60_000);
+}
+
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
+
+module.exports = {
+  app,
+  getOpenAIKey,
+  openAIRequestConfig,
+  runScheduledResearchBriefings,
+};

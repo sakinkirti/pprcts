@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef } from 'react'
 import { BrowserRouter as Router, Routes, Route, Link, useNavigate, useLocation } from 'react-router-dom'
 import './App.css'
 import { supabase } from './supabaseClient'
@@ -14,14 +14,31 @@ interface GlobalAudio {
   title: string;
 }
 
+type Theme = 'light' | 'dark'
+const THEME_STORAGE_KEY = 'pprcts-theme-v1'
+
+function getInitialTheme(): Theme {
+  const savedTheme = window.localStorage.getItem(THEME_STORAGE_KEY)
+  if (savedTheme === 'light' || savedTheme === 'dark') return savedTheme
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+}
+
 function AppContent() {
   const [session, setSession] = useState<Session | null>(null)
   const [authLoading, setAuthLoading] = useState(true) // Start loading
   const [globalAudio, setGlobalAudio] = useState<GlobalAudio | null>(null)
   const [isPlaying, setIsPlaying] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
+  const [theme, setTheme] = useState<Theme>(getInitialTheme)
+  const menuRef = useRef<HTMLDivElement>(null)
   const navigate = useNavigate();
   const location = useLocation();
+
+  useLayoutEffect(() => {
+    document.documentElement.dataset.theme = theme
+    document.documentElement.style.colorScheme = theme
+    window.localStorage.setItem(THEME_STORAGE_KEY, theme)
+  }, [theme])
 
   const getPageTitle = () => {
     switch (location.pathname) {
@@ -50,6 +67,25 @@ function AppContent() {
     return () => subscription.unsubscribe()
   }, [])
 
+  useEffect(() => {
+    setMenuOpen(false)
+  }, [location.pathname])
+
+  useEffect(() => {
+    if (!menuOpen) return
+    const closeMenu = (event: MouseEvent | KeyboardEvent) => {
+      if (event instanceof KeyboardEvent && event.key !== 'Escape') return
+      if (event instanceof MouseEvent && menuRef.current?.contains(event.target as Node)) return
+      setMenuOpen(false)
+    }
+    document.addEventListener('mousedown', closeMenu)
+    document.addEventListener('keydown', closeMenu)
+    return () => {
+      document.removeEventListener('mousedown', closeMenu)
+      document.removeEventListener('keydown', closeMenu)
+    }
+  }, [menuOpen])
+
   const handleLogin = async () => {
     const redirectUrl = window.location.origin
     await supabase.auth.signInWithOAuth({
@@ -70,20 +106,33 @@ function AppContent() {
     <div className="container">
       {/* Header with Hamburger */}
       <header className="header-row">
-        <h1 style={{ margin: 0 }}>pprcts ✂️</h1>
+        <Link to="/" className="brand" aria-label="pprcts home">pprcts <span aria-hidden="true">✂️</span></Link>
 
-        <div className="menu-container">
+        <div className="header-actions">
+          <button
+            type="button"
+            className="theme-toggle"
+            onClick={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')}
+            aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+          >
+            <span className="theme-toggle-icon" aria-hidden="true">{theme === 'dark' ? '☀' : '◐'}</span>
+            <span>{theme === 'dark' ? 'Light' : 'Dark'}</span>
+          </button>
+
+          <div className="menu-container" ref={menuRef}>
           <button
             className="hamburger-btn"
             onClick={() => setMenuOpen(!menuOpen)}
+            aria-expanded={menuOpen}
+            aria-controls="main-menu"
           >
             <span>{getPageTitle()}</span>
-            <span style={{ fontSize: '1.2rem' }}>☰</span>
+            <span aria-hidden="true">☰</span>
           </button>
 
           {/* Dropdown Menu */}
           {menuOpen && (
-            <div className="dropdown-menu">
+            <nav className="dropdown-menu" id="main-menu" aria-label="Main navigation">
               <Link to="/" onClick={() => setMenuOpen(false)} className="dropdown-link">Home</Link>
 
               {session && (
@@ -114,8 +163,9 @@ function AppContent() {
                   Log In / Sign Up
                 </button>
               )}
-            </div>
+            </nav>
           )}
+          </div>
         </div>
       </header>
 
@@ -152,7 +202,7 @@ function AppContent() {
         />
       )}
 
-      <footer className="fixed-support-footer">
+      <footer className="support-footer">
         <a
           href="https://buymeacoffee.com/sakinkirti"
           target="_blank"

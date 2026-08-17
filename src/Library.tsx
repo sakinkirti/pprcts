@@ -1,17 +1,27 @@
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 
 import type { Session } from '@supabase/supabase-js'
 import { API_URL } from './config';
+import { getBriefingTitle } from './briefing';
+import SummaryProvenance from './components/SummaryProvenance';
+import FailedBriefingCardContent from './components/FailedBriefingCardContent';
+import BriefingCardContent from './components/BriefingCardContent';
+import { getPaperId, getPaperSource } from './papers';
+import type { Paper, Podcast, SummaryProvenance as SummaryProvenanceData } from './types';
 
 interface LibraryProps {
     session: Session | null;
     setGlobalAudio: (audio: { url: string; title: string } | null) => void;
 }
 
+type LibraryPaper = Paper & { type: 'paper'; sortDate: string }
+type LibraryBriefing = Podcast & { type: 'briefing'; sortDate: string }
+type LibraryItem = LibraryPaper | LibraryBriefing
+
 export default function Library({ session, setGlobalAudio }: LibraryProps) {
-    const [papers, setPapers] = useState<any[]>([])
-    const [briefings, setBriefings] = useState<any[]>([])
+    const [papers, setPapers] = useState<Paper[]>([])
+    const [briefings, setBriefings] = useState<Podcast[]>([])
     const [loading, setLoading] = useState(false)
     const [error, setError] = useState('')
     const [filter, setFilter] = useState<'All' | 'Articles' | 'Briefings'>('All')
@@ -23,22 +33,19 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
     const [showModal, setShowModal] = useState(false)
     const [modalLoading, setModalLoading] = useState(false)
     const [modalError, setModalError] = useState('')
-    const [selectedPaper, setSelectedPaper] = useState<any>(null)
+    const [selectedPaper, setSelectedPaper] = useState<Paper | null>(null)
+    const [provenance, setProvenance] = useState<SummaryProvenanceData | null>(null)
     const [audioUrl, setAudioUrl] = useState<string | null>(null);
     const [audioLoading, setAudioLoading] = useState(false);
     const [audioError, setAudioError] = useState('');
 
     // Briefing Modal State
-    const [selectedBriefing, setSelectedBriefing] = useState<any>(null);
+    const [selectedBriefing, setSelectedBriefing] = useState<Podcast | null>(null);
     const [showBriefingModal, setShowBriefingModal] = useState(false);
+    const [retryingBriefingId, setRetryingBriefingId] = useState<string | null>(null);
+    const selectedPaperId = selectedPaper ? getPaperId(selectedPaper) : '';
 
-    useEffect(() => {
-        if (session?.access_token) {
-            fetchLibrary();
-        }
-    }, [session]);
-
-    const fetchLibrary = async () => {
+    const fetchLibrary = useCallback(async () => {
         setLoading(true);
         setError('');
         try {
@@ -61,14 +68,34 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
 
             setPapers(libData.library || []);
             setBriefings(briefData.briefings || []);
-        } catch (err) {
+        } catch {
             setError('Failed to load library.');
         } finally {
             setLoading(false);
         }
-    };
+    }, [session?.access_token]);
 
-    const openPaperModal = (paper: any) => {
+    useEffect(() => {
+        if (session?.access_token) fetchLibrary();
+    }, [fetchLibrary, session?.access_token]);
+
+    useEffect(() => {
+        if (!showModal && !showBriefingModal) return;
+        const previousOverflow = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+        const closeOnEscape = (event: KeyboardEvent) => {
+            if (event.key !== 'Escape') return;
+            setShowModal(false);
+            setShowBriefingModal(false);
+        };
+        document.addEventListener('keydown', closeOnEscape);
+        return () => {
+            document.body.style.overflow = previousOverflow;
+            document.removeEventListener('keydown', closeOnEscape);
+        };
+    }, [showModal, showBriefingModal]);
+
+    const openPaperModal = (paper: Paper) => {
         setSelectedPaper(paper);
         setShowModal(true);
         // If it's in library, it MIGHT have a summary already cached locally in the object if we returned it,
@@ -82,6 +109,7 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
         } else {
             setSummary('');
         }
+        setProvenance(paper.summary_metadata?.provenance || paper.summary_provenance || null);
         setAudioUrl(null);
         setModalError('');
         setAudioError('');
@@ -103,14 +131,7 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
             const res = await fetch(`${API_URL}/api/summarize`, {
                 method: 'POST',
                 headers,
-                body: JSON.stringify({
-                    pmid: selectedPaper.pmid,
-                    title: selectedPaper.title,
-                    abstract: selectedPaper.abstract,
-                    journal: selectedPaper.journal,
-                    authors: selectedPaper.authors,
-                    publication_date: selectedPaper.publication_date
-                })
+                body: JSON.stringify({ paper_id: selectedPaperId })
             })
             const data = await res.json()
 
@@ -129,6 +150,7 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
 
             if (data.summary) {
                 setSummary(data.summary)
+                setProvenance(data.provenance || null)
             } else {
                 setModalError('No summary returned.')
             }
@@ -138,6 +160,31 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
             setModalLoading(false)
         }
     }
+
+    const handleRetryBriefing = async (briefing: Podcast, event: React.MouseEvent<HTMLButtonElement>) => {
+        event.stopPropagation();
+        if (!session) return;
+        setRetryingBriefingId(briefing.id);
+        setError('');
+        try {
+            const response = await fetch(`${API_URL}/api/daily-podcast/generate`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${session.access_token}`,
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ date: briefing.date }),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(data.error || 'Failed to retry research briefing.');
+            await fetchLibrary();
+        } catch (caught) {
+            const message = caught instanceof Error ? caught.message : 'Failed to retry research briefing.';
+            setError(message);
+        } finally {
+            setRetryingBriefingId(null);
+        }
+    };
 
     // Audio Effect
     useEffect(() => {
@@ -152,12 +199,10 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
                 headers['Authorization'] = `Bearer ${session.access_token}`
             }
 
-            const pmid = selectedPaper?.pmid;
-
             fetch(`${API_URL}/api/tts`, {
                 method: 'POST',
                 headers,
-                body: JSON.stringify({ summary, pmid })
+                body: JSON.stringify({ paper_id: selectedPaperId })
             })
                 .then(async res => {
                     if (!res.ok) throw new Error('Failed to fetch audio');
@@ -167,7 +212,7 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
                 .catch(err => setAudioError(err.message))
                 .finally(() => setAudioLoading(false));
         }
-    }, [summary]);
+    }, [summary, selectedPaperId, session?.access_token]);
 
     if (!session) {
         return <div className="library-container"><p>Please log in to view your library.</p></div>
@@ -175,6 +220,11 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
 
     return (
         <div className="library-container">
+            <section className="page-heading library-heading" aria-labelledby="library-title">
+                <p className="eyebrow">Saved intelligence</p>
+                <h1 id="library-title">Your research library.</h1>
+                <p>Articles and briefings, organized into one working archive.</p>
+            </section>
 
             {loading && <p>Loading library...</p>}
             {error && <p style={{ color: 'red' }}>{error}</p>}
@@ -210,65 +260,57 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
                   - We want to mix them and sort by date descending.
                 */}
                 {(() => {
-                    let items: any[] = [];
+                    let items: LibraryItem[] = [];
                     if (filter === 'All' || filter === 'Articles') {
-                        items = items.concat(papers.map(p => ({ ...p, type: 'paper', sortDate: p.saved_at })));
+                        items = items.concat(papers.map(p => ({ ...p, type: 'paper' as const, sortDate: p.saved_at || '' })));
                     }
                     if (filter === 'All' || filter === 'Briefings') {
-                        items = items.concat(briefings.map(b => ({ ...b, type: 'briefing', sortDate: b.created_at })));
+                        items = items.concat(briefings.map(b => ({ ...b, type: 'briefing' as const, sortDate: b.created_at || b.date })));
                     }
 
                     items.sort((a, b) => {
                         return new Date(b.sortDate).getTime() - new Date(a.sortDate).getTime();
                     });
 
-                    return items.map((item, idx) => {
+                    return items.map((item) => {
                         if (item.type === 'briefing') {
                             return (
-                                <li key={`briefing-${idx}`} className="briefing-card" onClick={() => {
+                                <li key={`briefing-${item.id}`} className="briefing-card" onClick={() => {
+                                    if (item.status !== 'completed') return;
                                     setSelectedBriefing(item);
                                     setShowBriefingModal(true);
                                 }}>
                                     <div className="briefing-rainbow-bg"></div>
                                     <div className="briefing-card-content">
-                                        <div style={{ paddingRight: '50px' }}>
-                                            <div className="briefing-title">
-                                                {item.title}
-                                            </div>
-                                            <div className="briefing-meta" style={{ marginTop: '4px' }}>
-                                                {new Date(item.date + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}
-                                            </div>
-                                            {item.summary && (
-                                                <p style={{
-                                                    fontSize: '0.9rem',
-                                                    color: 'var(--text-primary)',
-                                                    margin: '8px 0 0 0',
-                                                    lineHeight: '1.5',
-                                                    opacity: 0.9
-                                                }}>
-                                                    {item.summary}
-                                                </p>
-                                            )}
-                                        </div>
-                                        <button
-                                            className="briefing-play-btn"
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                // need to handle playing
-                                                setGlobalAudio({
-                                                    url: item.audio_url,
-                                                    title: item.title
-                                                });
-                                            }}
-                                        >
-                                            ▶
-                                        </button>
+                                        {item.status === 'failed' ? (
+                                            <FailedBriefingCardContent
+                                                date={item.date}
+                                                summary={item.summary}
+                                                retrying={retryingBriefingId === item.id}
+                                                onRetry={(event) => handleRetryBriefing(item, event)}
+                                            />
+                                        ) : (
+                                            <BriefingCardContent
+                                                briefing={item}
+                                                onOpen={() => {
+                                                    setSelectedBriefing(item);
+                                                    setShowBriefingModal(true);
+                                                }}
+                                                onPlay={() => {
+                                                    if (!item.audio_url) return;
+                                                    setGlobalAudio({
+                                                        url: item.audio_url,
+                                                        title: getBriefingTitle(item.title),
+                                                    });
+                                                }}
+                                            />
+                                        )}
                                     </div>
                                 </li>
                             );
                         } else {
                             return (
-                                <li key={`paper-${idx}`} className="result-item">
+                                <li key={`paper-${getPaperId(item)}`} className="result-item">
                                     <a
                                         href="#"
                                         onClick={e => {
@@ -280,7 +322,8 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
                                     </a>
                                     <div className="card-meta">
                                         <div><strong>Authors:</strong> {item.authors && item.authors.length > 0 ? item.authors.join(', ') : 'No authors listed'}</div>
-                                        <div><strong>Journal:</strong> {item.journal || 'No journal listed'}</div>
+                                        <div><strong>Source:</strong> {getPaperSource(item) || 'No source listed'}</div>
+                                        {item.work_type && <div><strong>Type:</strong> {item.work_type.replaceAll('-', ' ')}</div>}
                                         <div><strong>Publication Date:</strong> {item.publication_date || 'No date listed'}</div>
                                     </div>
                                 </li>
@@ -293,13 +336,14 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
             {/* Modal - Duplicate code for now */}
             {showModal && selectedPaper && (
                 <div className="modal-overlay" onClick={() => setShowModal(false)}>
-                    <div className="modal-content" onClick={e => e.stopPropagation()}>
-                        <button className="modal-close" onClick={() => setShowModal(false)}>&times;</button>
-                        <h2>{selectedPaper.title}</h2>
+                    <div className="modal-content" role="dialog" aria-modal="true" aria-labelledby="library-paper-dialog-title" onClick={e => e.stopPropagation()}>
+                        <button autoFocus className="modal-close" aria-label="Close paper details" onClick={() => setShowModal(false)}>&times;</button>
+                        <h2 id="library-paper-dialog-title">{selectedPaper.title}</h2>
 
                         <div style={{ marginBottom: '16px', fontSize: '0.98rem', color: 'var(--text-secondary)' }}>
                             <div><strong>Authors:</strong> {selectedPaper.authors?.join(', ') || 'No authors listed'}</div>
-                            <div><strong>Journal:</strong> {selectedPaper.journal || 'No journal listed'}</div>
+                            <div><strong>Source:</strong> {getPaperSource(selectedPaper) || 'No source listed'}</div>
+                            {selectedPaper.work_type && <div><strong>Type:</strong> {selectedPaper.work_type.replaceAll('-', ' ')}</div>}
                             <div><strong>Publication Date:</strong> {selectedPaper.publication_date || 'No publication date listed'}</div>
                             <div style={{ marginTop: '10px' }}><strong>Abstract:</strong> {selectedPaper.abstract || 'No abstract listed'}</div>
                         </div>
@@ -307,12 +351,13 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
                         {modalError && <p style={{ color: 'red' }}>{modalError}</p>}
                         {!summary && !modalLoading && (
                             <div className="modal-actions">
-                                <button onClick={handleGenerateSummary} className="action-btn">Summarize</button>
+                                <button onClick={handleGenerateSummary} className="action-btn">Generate Grounded Summary</button>
                             </div>
                         )}
-                        {modalLoading && <p>Loading...</p>}
+                        {modalLoading && <p>Checking source access and grounding claims...</p>}
                         {summary && (
                             <div>
+                                {provenance && <SummaryProvenance provenance={provenance} />}
                                 {audioError && <p style={{ color: 'red' }}>{audioError}</p>}
                                 {audioUrl && (
                                     <div style={{ marginTop: '20px' }}>
@@ -361,7 +406,7 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
                         justifyContent: 'center',
                         padding: '20px'
                     }}>
-                        <div className="modal-content" onClick={e => e.stopPropagation()} style={{
+                        <div className="modal-content" role="dialog" aria-modal="true" aria-label="Briefing details" onClick={e => e.stopPropagation()} style={{
                             background: 'var(--bg-card)',
                             borderRadius: '24px',
                             padding: '30px',
@@ -372,6 +417,8 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
                             position: 'relative'
                         }}>
                             <button
+                                autoFocus
+                                aria-label="Close briefing details"
                                 onClick={() => setShowBriefingModal(false)}
                                 style={{
                                     position: 'absolute',
@@ -385,21 +432,22 @@ export default function Library({ session, setGlobalAudio }: LibraryProps) {
                                 }}
                             >&times;</button>
 
-                            <h2 style={{ marginTop: 0, marginBottom: '20px', fontSize: '1.5rem' }}>Daily Briefing Papers</h2>
+                            <h2 style={{ marginTop: 0, marginBottom: '20px', fontSize: '1.5rem' }}>Research Briefing Papers</h2>
                             <p style={{ color: 'var(--text-secondary)', marginBottom: '24px' }}>
-                                The following papers were discussed in your daily briefing for {new Date(selectedBriefing.date + 'T00:00:00').toLocaleDateString()}.
+                                The following papers were discussed in your research briefing for {new Date(selectedBriefing.date + 'T00:00:00').toLocaleDateString()}.
                             </p>
 
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-                                {selectedBriefing.papers_metadata && selectedBriefing.papers_metadata.map((paper: any, idx: number) => (
-                                    <div key={idx} style={{ paddingBottom: '16px', borderBottom: idx < selectedBriefing.papers_metadata.length - 1 ? '1px solid var(--border)' : 'none' }}>
+                                {(selectedBriefing.papers_metadata ?? []).map((paper: Paper, idx: number, papers: Paper[]) => (
+                                    <div key={idx} style={{ paddingBottom: '16px', borderBottom: idx < papers.length - 1 ? '1px solid var(--border)' : 'none' }}>
                                         <h3 style={{ fontSize: '1.1rem', marginBottom: '8px', color: 'var(--text-primary)' }}>{paper.title}</h3>
                                         <div style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>
-                                            {paper.authors?.slice(0, 3).join(', ')}{paper.authors?.length > 3 ? ' et al.' : ''} • {paper.journal}
+                                            {paper.authors?.slice(0, 3).join(', ')}{paper.authors?.length > 3 ? ' et al.' : ''} • {getPaperSource(paper)}
                                         </div>
                                         <p style={{ fontSize: '0.9rem', lineHeight: '1.5', margin: 0, opacity: 0.9 }}>
                                             {paper.abstract?.slice(0, 200)}...
                                         </p>
+                                        {paper.summary_provenance && <SummaryProvenance provenance={paper.summary_provenance} compact />}
                                     </div>
                                 ))}
                                 {!selectedBriefing.papers_metadata && (

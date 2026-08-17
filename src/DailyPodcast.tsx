@@ -2,6 +2,12 @@
 import { useState, useEffect } from 'react';
 import type { Session } from '@supabase/supabase-js';
 import { API_URL } from './config';
+import { getBriefingTitle } from './briefing';
+import { getPaperSource } from './papers';
+import type { Paper, Podcast } from './types';
+import SummaryProvenance from './components/SummaryProvenance';
+import FailedBriefingCardContent from './components/FailedBriefingCardContent';
+import BriefingCardContent from './components/BriefingCardContent';
 
 interface DailyPodcastProps {
     session: Session | null;
@@ -12,21 +18,29 @@ interface DailyPodcastProps {
 }
 
 export default function DailyPodcast({ session, setGlobalAudio, globalAudio, isPlaying, onPlayPause }: DailyPodcastProps) {
-    const [podcast, setPodcast] = useState<any>(null);
+    const [podcast, setPodcast] = useState<Podcast | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState('');
     const [showModal, setShowModal] = useState(false);
 
     useEffect(() => {
         let isStopped = false;
-        let pollTimer: any = null;
+        let pollTimer: ReturnType<typeof setTimeout> | null = null;
+
+        if (!session) {
+            setPodcast(null);
+            setLoading(false);
+            return;
+        }
+
+        setLoading(true);
+        setError('');
 
         const fetchDailyPodcast = async () => {
             if (!session || isStopped) return;
 
-            const userDate = new Date().toLocaleDateString('en-CA');
             try {
-                const res = await fetch(`${API_URL}/api/daily-podcast?date=${userDate}`, {
+                const res = await fetch(`${API_URL}/api/daily-podcast`, {
                     headers: {
                         'Authorization': `Bearer ${session.access_token}`
                     }
@@ -48,26 +62,39 @@ export default function DailyPodcast({ session, setGlobalAudio, globalAudio, isP
 
                 // Start polling if status is 'generating'
                 if (data.status === 'generating' && !isStopped) {
-                    console.log('Briefing is generating, polling in 10s...');
                     pollTimer = setTimeout(fetchDailyPodcast, 10000);
                 } else {
                     setLoading(false);
                 }
-            } catch (err: any) {
-                console.error('Error loading daily podcast:', err);
-                setError(err.message || 'Could not load daily podcast.');
+            } catch (caught) {
+                const err = caught instanceof Error ? caught : new Error('Could not load the research briefing.');
+                console.error('Error loading research briefing:', err);
+                setError(err.message || 'Could not load the research briefing.');
                 setLoading(false);
             }
         };
 
-        const initialTimer = setTimeout(fetchDailyPodcast, 1000);
+        fetchDailyPodcast();
 
         return () => {
             isStopped = true;
-            clearTimeout(initialTimer);
-            clearTimeout(pollTimer);
+            if (pollTimer) clearTimeout(pollTimer);
         };
     }, [session]);
+
+    useEffect(() => {
+        if (!showModal) return;
+        const previousOverflow = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
+        const closeOnEscape = (event: KeyboardEvent) => {
+            if (event.key === 'Escape') setShowModal(false);
+        };
+        document.addEventListener('keydown', closeOnEscape);
+        return () => {
+            document.body.style.overflow = previousOverflow;
+            document.removeEventListener('keydown', closeOnEscape);
+        };
+    }, [showModal]);
 
     const handleGenerate = async (e: React.MouseEvent) => {
         e.stopPropagation();
@@ -93,7 +120,8 @@ export default function DailyPodcast({ session, setGlobalAudio, globalAudio, isP
 
             const data = await res.json();
             setPodcast(data);
-        } catch (err: any) {
+        } catch (caught) {
+            const err = caught instanceof Error ? caught : new Error('Failed to generate briefing.');
             console.error('Generation error:', err);
             setError(err.message || 'Failed to generate briefing.');
         } finally {
@@ -103,6 +131,11 @@ export default function DailyPodcast({ session, setGlobalAudio, globalAudio, isP
 
     if (!session) return null;
 
+    const briefingTitle = getBriefingTitle(podcast?.title);
+    const userDate = new Date().toLocaleDateString('en-CA');
+    const isCurrentBriefing = podcast?.date === userDate;
+    const hasFailed = Boolean(error) || podcast?.status === 'failed';
+
     // If not loaded yet, show nothing or skeleton?
     // If not generated (podcast is null and not loading), show Generate Card
 
@@ -110,201 +143,69 @@ export default function DailyPodcast({ session, setGlobalAudio, globalAudio, isP
     return (
         <>
             <div
-                className="daily-podcast-card"
-                onClick={() => podcast && setShowModal(true)}
-                style={{
-                    position: 'relative',
-                    width: '100%',
-                    maxWidth: '700px', // Fill column space
-                    background: 'var(--bg-card)',
-                    borderRadius: '16px',
-                    padding: '2px', // Space for the rainbow border
-                    marginBottom: '16px', // Match .result-item margin
-                    backgroundClip: 'padding-box',
-                    boxShadow: '0 2px 8px rgba(0, 0, 0, 0.08)', // Match .result-item shadow base
-                    overflow: 'hidden',
-                    cursor: podcast ? 'pointer' : 'default',
-                    transition: 'box-shadow 0.2s ease',
-                }}
-                onMouseEnter={e => {
-                    if (podcast) e.currentTarget.style.boxShadow = '0 4px 16px rgba(0, 0, 0, 0.15)'
-                }}
-                onMouseLeave={e => {
-                    if (podcast) e.currentTarget.style.boxShadow = '0 2px 8px rgba(0, 0, 0, 0.08)'
-                }}
+                className="briefing-card daily-podcast-card"
+                onClick={() => podcast?.status === 'completed' && setShowModal(true)}
             >
                 {/* Rainbow Border Gradient */}
-                <div style={{
-                    position: 'absolute',
-                    top: 0,
-                    left: 0,
-                    right: 0,
-                    bottom: 0,
-                    borderRadius: '16px',
-                    background: 'linear-gradient(45deg, #ff0000, #ff7300, #fffb00, #48ff00, #00ffd5, #002bff, #7a00ff, #ff00c8, #ff0000)',
-                    backgroundSize: '400% 400%',
-                    animation: 'rainbow-border 10s ease infinite',
-                    zIndex: 0,
-                    opacity: podcast ? 1 : 0.5 // Dim border if not generated
-                }} />
+                <div className="briefing-rainbow-bg daily-rainbow-bg" />
 
-                <div style={{
-                    position: 'relative',
-                    background: 'var(--bg-card)',
-                    borderRadius: '14px',
-                    padding: '22px 26px', // Match .result-item padding (24-2, 28-2)
-                    zIndex: 1,
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '8px'
-                }}>
-                    {loading || (podcast?.status === 'generating') ? (
+                <div className="briefing-card-content">
+                    {hasFailed ? (
+                        <FailedBriefingCardContent
+                            date={podcast?.date || userDate}
+                            summary={error || podcast?.summary}
+                            retrying={loading}
+                            onRetry={handleGenerate}
+                        />
+                    ) : podcast ? (
+                        <BriefingCardContent
+                            briefing={podcast}
+                            isPlaying={globalAudio?.url === podcast.audio_url && isPlaying}
+                            onOpen={podcast.status === 'completed' ? () => setShowModal(true) : undefined}
+                            onPlay={() => {
+                                if (!podcast.audio_url) return;
+                                const isCurrentTrack = globalAudio?.url === podcast.audio_url;
+                                if (isCurrentTrack) {
+                                    onPlayPause(!isPlaying);
+                                } else {
+                                    setGlobalAudio({
+                                        url: podcast.audio_url,
+                                        title: `Research Briefing: ${briefingTitle}`,
+                                    });
+                                }
+                            }}
+                            actions={!isCurrentBriefing ? (
+                                <button type="button" className="briefing-details-btn" onClick={handleGenerate}>
+                                    Generate new briefing
+                                </button>
+                            ) : undefined}
+                        />
+                    ) : loading ? (
                         <div style={{ display: 'flex', alignItems: 'center', gap: '12px', color: 'var(--text-secondary)' }}>
                             <div className="loading-spinner" style={{ width: '16px', height: '16px', border: '2px solid var(--text-secondary)', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 1s linear infinite' }}></div>
-                            <span style={{ fontSize: '0.9rem' }}>{podcast?.status === 'generating' ? 'Curating your daily briefing...' : 'Loading...'}</span>
+                            <span style={{ fontSize: '0.9rem' }}>Loading...</span>
                         </div>
-                    ) : (error || podcast?.status === 'failed') ? (
-                        <div style={{ color: 'red', fontSize: '0.9rem', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                            <span>{error || podcast?.summary || 'Generation failed.'}</span>
-                            <button
-                                onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleGenerate(e);
-                                }}
-                                style={{
-                                    background: 'var(--bg-secondary)',
-                                    border: '1px solid var(--border)',
-                                    padding: '4px 8px',
-                                    borderRadius: '6px',
-                                    cursor: 'pointer',
-                                    fontSize: '0.8rem'
-                                }}
-                            >
-                                Retry
-                            </button>
-                        </div>
-                    ) : !podcast ? (
+                    ) : (
                         /* Generate State */
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                        <div className="daily-generate-row">
                             <div>
-                                <h2 style={{
-                                    fontSize: '1.1rem',
-                                    fontWeight: 600,
-                                    margin: '0 0 4px 0',
-                                    background: 'linear-gradient(90deg, #ff00c8, #7a00ff)',
-                                    WebkitBackgroundClip: 'text',
-                                    WebkitTextFillColor: 'transparent',
-                                }}>
-                                    Daily Briefing
+                                <h2 className="daily-briefing-kicker">
+                                    Research Briefing
                                 </h2>
                                 <p style={{ margin: 0, fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
-                                    Your personalized research update is ready to be generated.
+                                    Generate a personalized audio update whenever you are ready.
                                 </p>
                             </div>
                             <button
                                 onClick={handleGenerate}
-                                style={{
-                                    background: 'var(--accent)',
-                                    color: 'white',
-                                    border: 'none',
-                                    padding: '8px 16px',
-                                    borderRadius: '20px',
-                                    cursor: 'pointer',
-                                    fontSize: '1.0rem',
-                                    fontWeight: 500,
-                                    transition: 'background 0.2s'
-                                }}
+                                className="action-btn"
                             >
                                 Generate
                             </button>
                         </div>
-                    ) : (
-                        /* Podcast Exists State */
-                        <>
-                            <div style={{ paddingRight: '50px' }}>
-                                <div style={{ display: 'flex', alignItems: 'baseline', gap: '6px', flexWrap: 'wrap' }}>
-                                    <h2 style={{
-                                        fontSize: '1.1rem', // Match .result-item a
-                                        fontWeight: 600, // Slightly bolder but close to 500
-                                        margin: 0,
-                                        background: 'linear-gradient(90deg, #ff00c8, #7a00ff)',
-                                        WebkitBackgroundClip: 'text',
-                                        WebkitTextFillColor: 'transparent',
-                                    }}>
-                                        Daily Briefing /
-                                    </h2>
-                                    {podcast.title && (
-                                        <span style={{ fontSize: '1.1rem', fontWeight: 500, color: 'var(--text-primary)' }}>
-                                            {podcast.title.replace(/^Daily Research Update: .*$/, 'Wait for generation...').replace(/^Title: /, '') /* Cleanup if generation raw */}
-                                        </span>
-                                    )}
-                                </div>
-                                <div style={{ fontSize: '0.95rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                                    {new Date((podcast.date || new Date().toLocaleDateString('en-CA')) + 'T00:00:00').toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' })}
-                                </div>
-                                {podcast.summary && (
-                                    <p style={{
-                                        fontSize: '0.95rem',
-                                        color: 'var(--text-primary)',
-                                        margin: '12px 0 0 0',
-                                        lineHeight: '1.5',
-                                        opacity: 0.9
-                                    }}>
-                                        {podcast.summary}
-                                    </p>
-                                )}
-                            </div>
-
-                            <button
-                                onClick={(e) => {
-                                    e.stopPropagation();
-                                    const isCurrentTrack = globalAudio?.url === podcast.audio_url;
-
-                                    if (isCurrentTrack) {
-                                        onPlayPause(!isPlaying);
-                                    } else {
-                                        setGlobalAudio({
-                                            url: podcast.audio_url,
-                                            title: "Daily Briefing: " + podcast.title
-                                        });
-                                    }
-                                }}
-                                style={{
-                                    position: 'absolute',
-                                    top: '22px',
-                                    right: '26px',
-                                    width: '48px',
-                                    height: '48px',
-                                    minWidth: '48px', // Force circle
-                                    borderRadius: '50%',
-                                    padding: 0, // Remove default padding
-                                    background: 'var(--accent)',
-                                    border: 'none',
-                                    color: 'white',
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: 'center',
-                                    cursor: 'pointer',
-                                    boxShadow: '0 4px 10px rgba(59, 130, 246, 0.3)',
-                                    zIndex: 10,
-                                    fontSize: '1.5rem',
-                                    lineHeight: '1',
-                                }}
-                            >
-                                {globalAudio?.url === podcast.audio_url && isPlaying ? '⏸' : '▶'}
-                            </button>
-                        </>
                     )}
                 </div>
             </div>
-
-            {/* Spinner CSS */}
-            <style>{`
-                @keyframes spin {
-                    0% { transform: rotate(0deg); }
-                    100% { transform: rotate(360deg); }
-                }
-            `}</style>
 
             {/* Papers Modal */}
             {showModal && podcast && (
@@ -321,7 +222,7 @@ export default function DailyPodcast({ session, setGlobalAudio, globalAudio, isP
                     justifyContent: 'center',
                     padding: '20px'
                 }}>
-                    <div className="modal-content" onClick={e => e.stopPropagation()} style={{
+                    <div className="modal-content" role="dialog" aria-modal="true" aria-label="Research briefing papers" onClick={e => e.stopPropagation()} style={{
                         background: 'var(--bg-card)',
                         borderRadius: '24px',
                         padding: '30px',
@@ -332,6 +233,8 @@ export default function DailyPodcast({ session, setGlobalAudio, globalAudio, isP
                         position: 'relative'
                     }}>
                         <button
+                            autoFocus
+                            aria-label="Close research briefing details"
                             onClick={() => setShowModal(false)}
                             style={{
                                 position: 'absolute',
@@ -345,21 +248,22 @@ export default function DailyPodcast({ session, setGlobalAudio, globalAudio, isP
                             }}
                         >&times;</button>
 
-                        <h2 style={{ marginTop: 0, marginBottom: '20px', fontSize: '1.5rem' }}>Daily Briefing Papers</h2>
+                        <h2 style={{ marginTop: 0, marginBottom: '20px', fontSize: '1.5rem' }}>Research Briefing Papers</h2>
                         <p style={{ color: 'var(--text-secondary)', marginBottom: '24px' }}>
-                            The following papers were discussed in your daily briefing for {new Date(podcast.date + 'T00:00:00').toLocaleDateString()}.
+                            The following papers were discussed in your research briefing for {new Date(podcast.date + 'T00:00:00').toLocaleDateString()}.
                         </p>
 
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '20px' }}>
-                            {podcast.papers_metadata && podcast.papers_metadata.map((paper: any, idx: number) => (
-                                <div key={idx} style={{ paddingBottom: '16px', borderBottom: idx < podcast.papers_metadata.length - 1 ? '1px solid var(--border)' : 'none' }}>
+                            {(podcast.papers_metadata ?? []).map((paper: Paper, idx: number, papers: Paper[]) => (
+                                <div key={idx} style={{ paddingBottom: '16px', borderBottom: idx < papers.length - 1 ? '1px solid var(--border)' : 'none' }}>
                                     <h3 style={{ fontSize: '1.1rem', marginBottom: '8px', color: 'var(--text-primary)' }}>{paper.title}</h3>
                                     <div style={{ fontSize: '0.9rem', color: 'var(--text-secondary)', marginBottom: '8px' }}>
-                                        {paper.authors?.slice(0, 3).join(', ')}{paper.authors?.length > 3 ? ' et al.' : ''} • {paper.journal}
+                                        {paper.authors?.slice(0, 3).join(', ')}{paper.authors?.length > 3 ? ' et al.' : ''} • {getPaperSource(paper)}
                                     </div>
                                     <p style={{ fontSize: '0.9rem', lineHeight: '1.5', margin: 0, opacity: 0.9 }}>
                                         {paper.abstract?.slice(0, 200)}...
                                     </p>
+                                    {paper.summary_provenance && <SummaryProvenance provenance={paper.summary_provenance} compact />}
                                 </div>
                             ))}
                             {!podcast.papers_metadata && (
@@ -379,13 +283,6 @@ export default function DailyPodcast({ session, setGlobalAudio, globalAudio, isP
                 </div>
             )}
 
-            <style>{`
-                @keyframes rainbow-border {
-                    0% { background-position: 0% 50% }
-                    50% { background-position: 100% 50% }
-                    100% { background-position: 0% 50% }
-                }
-            `}</style>
         </>
     );
 }
