@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { getPaperIdentityKeys, normalizePaperIdentity } = require('./briefing-history');
 
 const OPENALEX_API_ORIGIN = 'https://api.openalex.org';
 const OPENALEX_WORK_FIELDS = [
@@ -239,9 +240,14 @@ async function fetchBriefingCandidates(queries, options = {}) {
 
   const lookbackWindows = options.lookbackWindows || [45, 180, 730];
   const maxResults = Math.max(1, Math.min(10, Number(options.maxResults) || 3));
-  const perQuery = Math.max(1, Math.min(5, Number(options.perQuery) || 2));
+  const perQuery = Math.max(1, Math.min(50, Number(options.perQuery) || 10));
   const now = options.now || new Date();
   const papersById = new Map();
+  const excludedPaperIds = new Set(
+    Array.from(options.excludedPaperIds || [])
+      .map(normalizePaperIdentity)
+      .filter(Boolean),
+  );
 
   for (const lookbackDays of lookbackWindows) {
     const batches = await Promise.all(normalizedQueries.map(async (query) => {
@@ -260,6 +266,7 @@ async function fetchBriefingCandidates(queries, options = {}) {
       for (const batch of batches) {
         const paper = batch[index];
         if (!paper || papersById.has(paper.paper_id)) continue;
+        if (getPaperIdentityKeys(paper).some((identity) => excludedPaperIds.has(identity))) continue;
         papersById.set(paper.paper_id, paper);
       }
     }

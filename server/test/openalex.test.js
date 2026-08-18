@@ -173,3 +173,33 @@ test('fetchBriefingCandidates searches interests separately and widens recency w
     'predictive coding',
   ]);
 });
+
+test('fetchBriefingCandidates excludes previously briefed works across catalog aliases', async () => {
+  const httpClient = {
+    async get() {
+      return {
+        data: {
+          results: [
+            sampleWork,
+            {
+              ...sampleWork,
+              id: 'https://openalex.org/W999',
+              ids: { openalex: 'https://openalex.org/W999' },
+              display_name: 'A fresh research result',
+            },
+          ],
+        },
+      };
+    },
+  };
+
+  const result = await fetchBriefingCandidates(['research'], {
+    httpClient,
+    maxResults: 1,
+    perQuery: 2,
+    lookbackWindows: [45],
+    excludedPaperIds: new Set(['W123456']),
+  });
+
+  assert.deepEqual(result.papers.map((paper) => paper.openalex_id), ['W999']);
+});

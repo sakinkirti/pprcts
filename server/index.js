@@ -29,6 +29,7 @@ const {
   recentDate,
 } = require('./openalex');
 const { addPaperToLibrary } = require('./library');
+const { loadPreviouslyBriefedPaperIds } = require('./briefing-history');
 const {
   getZonedDateTime,
   isBriefingStale,
@@ -715,7 +716,7 @@ const generateResearchBriefing = async (userId, supabaseClient, userDate = null)
 
   try {
     // 1. Fetch User Interests from Library
-    const [libraryResult, settingsResult] = await Promise.all([
+    const [libraryResult, settingsResult, previouslyBriefedPaperIds] = await Promise.all([
       supabaseClient
         .from('user_library')
         .select('papers(title, abstract)')
@@ -727,6 +728,7 @@ const generateResearchBriefing = async (userId, supabaseClient, userDate = null)
         .select('keywords')
         .eq('user_id', userId)
         .maybeSingle(),
+      loadPreviouslyBriefedPaperIds(supabaseClient, userId),
     ]);
     if (libraryResult.error) throw libraryResult.error;
     if (settingsResult.error) throw settingsResult.error;
@@ -755,13 +757,14 @@ const generateResearchBriefing = async (userId, supabaseClient, userDate = null)
     const discovery = await fetchBriefingCandidates(searchQueries, {
       apiKey: openAlexApiKey,
       maxResults: 3,
-      perQuery: 2,
+      perQuery: 25,
+      excludedPaperIds: previouslyBriefedPaperIds,
     });
     const papers = discovery.papers;
-    console.log(`[Research Briefing] Discovery found ${papers.length} candidates across ${searchQueries.length} interests using a ${discovery.lookbackDays}-day window.`);
+    console.log(`[Research Briefing] Discovery found ${papers.length} unused candidates across ${searchQueries.length} interests using a ${discovery.lookbackDays}-day window; excluded ${previouslyBriefedPaperIds.size} previously briefed papers.`);
 
     if (papers.length === 0) {
-      throw new Error('No recent papers with abstracts matched the saved research interests.');
+      throw new Error('No new papers with abstracts matched the saved research interests. Papers from completed briefings are not reused.');
     }
 
     const groundedPapers = [];
