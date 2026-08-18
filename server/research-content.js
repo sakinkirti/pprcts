@@ -1,21 +1,13 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
 const { gunzipSync } = require('node:zlib');
+const { isClearlyReusableLicense } = require('./content-license');
 
 const OPENALEX_API_ORIGIN = 'https://api.openalex.org';
 const OPENALEX_CONTENT_ORIGIN = 'https://content.openalex.org';
 const MAX_CONTENT_BYTES = 8 * 1024 * 1024;
 const MAX_DECOMPRESSED_CONTENT_BYTES = 16 * 1024 * 1024;
 const DEFAULT_MAX_EVIDENCE_CHARS = 120_000;
-
-const CLEARLY_REUSABLE_LICENSES = new Set([
-  'cc0',
-  'cc-0',
-  'cc-by',
-  'public-domain',
-  'public_domain',
-  'pd',
-]);
 
 const SKIPPED_SECTION_PATTERN = /^(references?|bibliography|acknowledg(?:e)?ments?|funding|author contributions?|supplementary|appendi(?:x|ces)|conflicts? of interest|competing interests?)\b/i;
 
@@ -24,17 +16,6 @@ function cleanText(value) {
     .replace(/\u0000/g, '')
     .replace(/\s+/g, ' ')
     .trim();
-}
-
-function normalizeLicense(value) {
-  return cleanText(value).toLowerCase().replace(/\s+/g, '-');
-}
-
-function isClearlyReusableLicense(value) {
-  const license = normalizeLicense(value);
-  return CLEARLY_REUSABLE_LICENSES.has(license)
-    || license.startsWith('cc-by-4')
-    || license.startsWith('cc0-1');
 }
 
 function getOpenAlexWorkId(value) {

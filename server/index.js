@@ -22,10 +22,9 @@ const {
 } = require('./supabase');
 const { encryptSecret, decryptSecret, getEncryptionKey } = require('./secrets');
 const {
-  buildBriefingQueries,
-  fetchBriefingCandidates,
   fetchOpenAlexWork,
   fetchOpenAlexWorks,
+  fetchPersonalizedBriefingCandidates,
   recentDate,
 } = require('./openalex');
 const { addPaperToLibrary } = require('./library');
@@ -63,6 +62,7 @@ const {
   requireAuth,
   isIsoDate,
 } = require('./security');
+const { buildSpeechRequest } = require('./speech');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -611,21 +611,19 @@ app.post('/api/tts', requireAuth, aiRateLimit, async (req, res) => {
     }
     const audioBuffers = [];
     for (const chunk of chunks) {
-      const ttsRes = await axios.post('https://api.openai.com/v1/audio/speech', {
-        model: 'tts-1',
-        input: chunk,
-        voice: 'echo',
-        speed: 1.15,
-        response_format: 'mp3'
-      }, {
-        headers: {
-          'Authorization': `Bearer ${openaiApiKey}`,
-          'Content-Type': 'application/json',
-          'X-Client-Request-Id': req.requestId,
+      const ttsRes = await axios.post(
+        'https://api.openai.com/v1/audio/speech',
+        buildSpeechRequest(chunk),
+        {
+          headers: {
+            'Authorization': `Bearer ${openaiApiKey}`,
+            'Content-Type': 'application/json',
+            'X-Client-Request-Id': req.requestId,
+          },
+          responseType: 'arraybuffer',
+          timeout: 90_000,
         },
-        responseType: 'arraybuffer',
-        timeout: 90_000,
-      });
+      );
       audioBuffers.push(Buffer.from(ttsRes.data));
     }
     const stitchedAudio = Buffer.concat(audioBuffers);
@@ -719,7 +717,7 @@ const generateResearchBriefing = async (userId, supabaseClient, userDate = null)
     const [libraryResult, settingsResult, previouslyBriefedPaperIds] = await Promise.all([
       supabaseClient
         .from('user_library')
-        .select('papers(title, abstract)')
+        .select('papers(pmid, pubmed_id, openalex_id, doi, title, abstract, primary_topic)')
         .eq('user_id', userId)
         .order('saved_at', { ascending: false })
         .limit(20),
@@ -733,15 +731,11 @@ const generateResearchBriefing = async (userId, supabaseClient, userDate = null)
     if (libraryResult.error) throw libraryResult.error;
     if (settingsResult.error) throw settingsResult.error;
 
-    const recentTitles = (libraryResult.data || [])
-      .map((item) => item.papers?.title)
+    const libraryPapers = (libraryResult.data || [])
+      .map((item) => item.papers)
       .filter(Boolean);
     const researchInterests = String(settingsResult.data?.keywords || '').trim();
-    const searchQueries = buildBriefingQueries({
-      keywords: researchInterests,
-      recentTitles,
-    });
-    if (searchQueries.length === 0) {
+    if (libraryPapers.length === 0 && !researchInterests) {
       throw new Error('Add research interests or save a paper before generating a briefing.');
     }
 
@@ -752,19 +746,25 @@ const generateResearchBriefing = async (userId, supabaseClient, userDate = null)
     }
     const openAlexApiKey = await getOpenAlexKey(userId);
 
-    // 3. Search each user-authored interest independently. If a very recent
-    // window is sparse, widen it in bounded steps rather than failing the job.
-    const discovery = await fetchBriefingCandidates(searchQueries, {
+    // 3. Let the recent research library drive discovery first. Broader saved
+    // interests only fill slots that library-derived searches cannot supply.
+    const discovery = await fetchPersonalizedBriefingCandidates({
+      libraryPapers,
+      researchInterests,
+    }, {
       apiKey: openAlexApiKey,
       maxResults: 3,
       perQuery: 25,
       excludedPaperIds: previouslyBriefedPaperIds,
     });
     const papers = discovery.papers;
-    console.log(`[Research Briefing] Discovery found ${papers.length} unused candidates across ${searchQueries.length} interests using a ${discovery.lookbackDays}-day window; excluded ${previouslyBriefedPaperIds.size} previously briefed papers.`);
+    const discoveryStages = discovery.stages
+      .map((stage) => `${stage.source}:${stage.paperCount}`)
+      .join(', ');
+    console.log(`[Research Briefing] Discovery found ${papers.length} unused candidates (${discoveryStages || 'no search stage'}) using a ${discovery.lookbackDays}-day window; library papers: ${libraryPapers.length}; excluded previous briefing papers: ${previouslyBriefedPaperIds.size}.`);
 
     if (papers.length === 0) {
-      throw new Error('No new papers with abstracts matched the saved research interests. Papers from completed briefings are not reused.');
+      throw new Error('No new papers with abstracts matched the research library or saved interests. Papers from completed briefings are not reused.');
     }
 
     const groundedPapers = [];
@@ -888,14 +888,13 @@ const generateResearchBriefing = async (userId, supabaseClient, userDate = null)
     const audioBuffers = [];
     console.log('[Research Briefing] Generating audio chunk by chunk...');
     for (const chunk of chunks) {
-      const ttsRes = await axios.post('https://api.openai.com/v1/audio/speech', {
-        model: 'tts-1',
-        input: chunk,
-        voice: 'echo',
-        response_format: 'mp3'
-      }, openAIRequestConfig(openaiApiKey, `podcast-audio-${userId}-${today}`, {
-        responseType: 'arraybuffer',
-      }));
+      const ttsRes = await axios.post(
+        'https://api.openai.com/v1/audio/speech',
+        buildSpeechRequest(chunk),
+        openAIRequestConfig(openaiApiKey, `podcast-audio-${userId}-${today}`, {
+          responseType: 'arraybuffer',
+        }),
+      );
       audioBuffers.push(Buffer.from(ttsRes.data));
     }
     const finalAudio = Buffer.concat(audioBuffers);

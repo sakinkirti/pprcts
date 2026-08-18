@@ -1,7 +1,9 @@
 const axios = require('axios');
 const { getPaperIdentityKeys, normalizePaperIdentity } = require('./briefing-history');
+const { hasReusableParsedFullText } = require('./content-license');
 
 const OPENALEX_API_ORIGIN = 'https://api.openalex.org';
+const EVIDENCE_PREFERENCE_BAND_SIZE = 3;
 const OPENALEX_WORK_FIELDS = [
   'id',
   'ids',
@@ -95,6 +97,8 @@ function mapOpenAlexWork(work) {
     indexed_in: Array.isArray(work?.indexed_in) ? work.indexed_in : [],
     cited_by_count: Number(work?.cited_by_count) || 0,
     is_open_access: Boolean(work?.open_access?.is_oa),
+    has_reusable_full_text: hasReusableParsedFullText(work),
+    full_text_license: work?.best_oa_location?.license || null,
   };
 }
 
@@ -130,6 +134,15 @@ function buildBriefingQueries({ keywords, recentTitles = [], maxQueries = 5 } = 
   return queries;
 }
 
+function buildLibraryBriefingQueries(libraryPapers, maxQueries = 5) {
+  const signals = [];
+  for (const paper of libraryPapers || []) {
+    if (paper?.primary_topic) signals.push(paper.primary_topic);
+    if (paper?.title) signals.push(paper.title);
+  }
+  return buildBriefingQueries({ recentTitles: signals, maxQueries });
+}
+
 const BRIEFING_QUERY_STOP_WORDS = new Set([
   'and', 'for', 'from', 'into', 'study', 'the', 'using', 'with',
 ]);
@@ -153,6 +166,23 @@ function isBriefingCandidateRelevant(paper, query) {
   ].join(' ').toLowerCase();
   const matches = tokens.filter((token) => searchableText.includes(token)).length;
   return matches >= Math.min(2, tokens.length);
+}
+
+function preferReusableEvidence(papers, { enabled = true } = {}) {
+  if (!enabled) return [...papers];
+  const preferred = [];
+
+  // OpenAlex returns results in relevance order. Treat each small adjacent
+  // cohort as effectively tied, preferring safely reusable parsed text only
+  // inside that cohort so evidence availability cannot overwhelm relevance.
+  for (let index = 0; index < papers.length; index += EVIDENCE_PREFERENCE_BAND_SIZE) {
+    const band = papers.slice(index, index + EVIDENCE_PREFERENCE_BAND_SIZE);
+    preferred.push(
+      ...band.filter((paper) => paper.has_reusable_full_text),
+      ...band.filter((paper) => !paper.has_reusable_full_text),
+    );
+  }
+  return preferred;
 }
 
 function buildWorkFilters({ fromPublicationDate, requireAbstract = true } = {}) {
@@ -243,6 +273,9 @@ async function fetchBriefingCandidates(queries, options = {}) {
   const perQuery = Math.max(1, Math.min(50, Number(options.perQuery) || 10));
   const now = options.now || new Date();
   const papersById = new Map();
+  const canRetrievePreferredEvidence = Boolean(
+    options.apiKey ?? process.env.OPENALEX_API_KEY ?? '',
+  );
   const excludedPaperIds = new Set(
     Array.from(options.excludedPaperIds || [])
       .map(normalizePaperIdentity)
@@ -257,7 +290,8 @@ async function fetchBriefingCandidates(queries, options = {}) {
         perPage: perQuery,
         fromPublicationDate: recentDate(lookbackDays, now),
       });
-      return papers.filter((paper) => isBriefingCandidateRelevant(paper, query));
+      const relevantPapers = papers.filter((paper) => isBriefingCandidateRelevant(paper, query));
+      return preferReusableEvidence(relevantPapers, { enabled: canRetrievePreferredEvidence });
     }));
 
     // Round-robin selection prevents one broad interest from dominating all
@@ -285,18 +319,82 @@ async function fetchBriefingCandidates(queries, options = {}) {
   };
 }
 
+async function fetchPersonalizedBriefingCandidates({
+  libraryPapers = [],
+  researchInterests = '',
+} = {}, options = {}) {
+  const {
+    fetchCandidates = fetchBriefingCandidates,
+    ...candidateOptions
+  } = options;
+  const maxResults = Math.max(1, Math.min(10, Number(candidateOptions.maxResults) || 3));
+  const excludedPaperIds = new Set(
+    Array.from(candidateOptions.excludedPaperIds || [])
+      .map(normalizePaperIdentity)
+      .filter(Boolean),
+  );
+
+  // A saved paper is a preference signal, not a new discovery. Excluding all
+  // of its known aliases lets OpenAlex return adjacent work instead of simply
+  // placing that same library item into the briefing.
+  for (const paper of libraryPapers || []) {
+    for (const identity of getPaperIdentityKeys(paper)) excludedPaperIds.add(identity);
+  }
+
+  const libraryQueries = buildLibraryBriefingQueries(libraryPapers);
+  const interestQueries = buildBriefingQueries({ keywords: researchInterests });
+  const papers = [];
+  const stages = [];
+
+  const runStage = async (source, queries) => {
+    if (queries.length === 0 || papers.length >= maxResults) return;
+    const paperCountBeforeStage = papers.length;
+    const result = await fetchCandidates(queries, {
+      ...candidateOptions,
+      maxResults: maxResults - papers.length,
+      excludedPaperIds,
+    });
+
+    for (const paper of result.papers || []) {
+      if (getPaperIdentityKeys(paper).some((identity) => excludedPaperIds.has(identity))) continue;
+      papers.push(paper);
+      for (const identity of getPaperIdentityKeys(paper)) excludedPaperIds.add(identity);
+      if (papers.length >= maxResults) break;
+    }
+    stages.push({
+      source,
+      paperCount: papers.length - paperCountBeforeStage,
+      lookbackDays: result.lookbackDays,
+    });
+  };
+
+  await runStage('library', libraryQueries);
+  await runStage('interests', interestQueries);
+
+  return {
+    papers,
+    libraryQueries,
+    interestQueries,
+    stages,
+    lookbackDays: stages.at(-1)?.lookbackDays || null,
+  };
+}
+
 module.exports = {
   OPENALEX_WORK_FIELDS,
   buildBriefingQueries,
+  buildLibraryBriefingQueries,
   buildWorkFilters,
   extractOpenAlexId,
   extractPubmedId,
   fetchOpenAlexWork,
   fetchOpenAlexWorks,
   fetchBriefingCandidates,
+  fetchPersonalizedBriefingCandidates,
   isBriefingCandidateRelevant,
   mapOpenAlexWork,
   normalizeDoi,
+  preferReusableEvidence,
   recentDate,
   reconstructAbstract,
 };
