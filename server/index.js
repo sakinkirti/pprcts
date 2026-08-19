@@ -24,8 +24,11 @@ const { encryptSecret, decryptSecret, getEncryptionKey } = require('./secrets');
 const {
   fetchOpenAlexWork,
   fetchOpenAlexWorks,
+  fetchOpenAlexWorksByAuthor,
   fetchPersonalizedBriefingCandidates,
   recentDate,
+  searchOpenAlexAuthors,
+  searchOpenAlexWorksByTitle,
 } = require('./openalex');
 const { addPaperToLibrary } = require('./library');
 const { loadPreviouslyBriefedPaperIds } = require('./briefing-history');
@@ -53,6 +56,8 @@ const {
   RESEARCH_BRIEFING_OUTLINE_RESPONSE_FORMAT,
   buildResearchBriefingOutlineMessages,
   buildResearchBriefingSectionMessages,
+  getBriefingEpisodeWordPlan,
+  getBriefingPaperTargetWords,
   normalizeResearchBriefingOutline,
 } = require('./briefing-script');
 const {
@@ -393,13 +398,57 @@ app.get('/api/library', requireAuth, async (req, res) => {
 // trusted preprint repositories such as arXiv.
 app.get('/api/search', async (req, res) => {
   const query = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+  const mode = ['all', 'title', 'author', 'doi', 'arxiv'].includes(req.query.mode)
+    ? req.query.mode
+    : 'all';
+  const requestedAuthorId = typeof req.query.author_id === 'string' ? req.query.author_id : '';
   if (!query || query.length > 300) {
     return res.status(400).json({ error: 'Search query must be between 1 and 300 characters' });
   }
   try {
     const openAlexApiKey = await getOpenAlexKey(req.user?.id);
-    const results = await fetchOpenAlexWorks(query, { perPage: 20, apiKey: openAlexApiKey });
-    res.json({ results, source: 'OpenAlex' });
+    if (mode === 'doi') {
+      const paper = await fetchOpenAlexWork(query, { apiKey: openAlexApiKey });
+      return res.json({ results: [paper], source: 'OpenAlex', mode, label: 'Exact DOI match' });
+    }
+    if (mode === 'author') {
+      const authors = requestedAuthorId
+        ? []
+        : await searchOpenAlexAuthors(query, { perPage: 5, apiKey: openAlexApiKey });
+      const selectedAuthorId = requestedAuthorId || authors[0]?.id;
+      if (!selectedAuthorId) {
+        return res.json({ results: [], authors, source: 'OpenAlex', mode, label: 'No author matched that name' });
+      }
+      const results = await fetchOpenAlexWorksByAuthor(selectedAuthorId, {
+        perPage: 50,
+        apiKey: openAlexApiKey,
+      });
+      const selectedAuthor = authors.find((author) => author.id === selectedAuthorId)
+        || { id: selectedAuthorId, name: query, institution: null };
+      return res.json({
+        results,
+        authors,
+        selectedAuthor,
+        source: 'OpenAlex',
+        mode,
+        label: `Works by ${selectedAuthor.name}`,
+      });
+    }
+    if (mode === 'title') {
+      const results = await searchOpenAlexWorksByTitle(query, { perPage: 50, apiKey: openAlexApiKey });
+      return res.json({ results, source: 'OpenAlex', mode, label: 'Title matches' });
+    }
+    const results = await fetchOpenAlexWorks(query, {
+      perPage: mode === 'arxiv' ? 50 : 20,
+      apiKey: openAlexApiKey,
+      requireAbstract: false,
+    });
+    res.json({
+      results,
+      source: 'OpenAlex',
+      mode,
+      label: mode === 'arxiv' ? 'arXiv identifier matches' : 'Topic matches',
+    });
   } catch (error) {
     console.error(`[${req.requestId}] OpenAlex search error:`, error?.response?.status || error.message);
     res.status(502).json({ error: 'Unable to reach the research catalog' });
@@ -805,11 +854,16 @@ const generateResearchBriefing = async (userId, supabaseClient, userDate = null)
       evidence_warning: evidence.warning,
       evidence: evidenceMap,
     }));
-    const targetTotalWords = Math.max(600, Math.min(2_200,
-      220 + groundedPapers.reduce((total, item) => total + Math.min(
-        item.evidence.basis === 'full_text' ? 650 : 240,
-        getSummaryTargetWords(item.evidence, item.evidenceMap),
-      ), 0)));
+    const briefingWordPlan = getBriefingEpisodeWordPlan(paperPackets);
+    const paperPacketsWithBudgets = paperPackets.map((packet, index) => ({
+      ...packet,
+      briefing_target_words: briefingWordPlan.paperTargets[index],
+    }));
+    const briefingTargetByPaperId = new Map(
+      paperPacketsWithBudgets.map((packet) => [packet.paper_id, packet.briefing_target_words]),
+    );
+    const targetTotalWords = briefingWordPlan.targetTotalWords;
+    const outlinePaperPackets = paperPacketsWithBudgets;
 
     // --- HIERARCHICAL GENERATION START ---
 
@@ -818,7 +872,7 @@ const generateResearchBriefing = async (userId, supabaseClient, userDate = null)
     const outlineRes = await axios.post('https://api.openai.com/v1/chat/completions', {
       model: SUMMARY_MODEL,
       messages: buildResearchBriefingOutlineMessages({
-        paperPackets,
+        paperPackets: outlinePaperPackets,
         researchInterests,
         targetTotalWords,
       }),
@@ -828,7 +882,7 @@ const generateResearchBriefing = async (userId, supabaseClient, userDate = null)
 
     const outlineData = normalizeResearchBriefingOutline(
       JSON.parse(outlineRes.data.choices[0].message.content),
-      paperPackets,
+      outlinePaperPackets,
     );
 
     // 5b. Step 2: Generate Script Section by Section
@@ -855,6 +909,8 @@ const generateResearchBriefing = async (userId, supabaseClient, userDate = null)
         content_license: evidence.license,
         evidence_warning: evidence.warning,
         evidence: evidenceMap,
+        briefing_target_words: briefingTargetByPaperId.get(paper.paper_id)
+          || getBriefingPaperTargetWords({ evidence_basis: evidence.basis, evidence: evidenceMap }),
       }));
 
       const sectionRes = await axios.post('https://api.openai.com/v1/chat/completions', {

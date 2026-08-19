@@ -7,6 +7,24 @@ import SummaryProvenance from './components/SummaryProvenance';
 import { getPaperId, getPaperSource } from './papers';
 import type { Paper, SummaryProvenance as SummaryProvenanceData } from './types';
 
+type SearchMode = 'all' | 'title' | 'author' | 'doi' | 'arxiv';
+
+interface AuthorCandidate {
+    id: string;
+    name: string;
+    works_count: number;
+    cited_by_count: number;
+    institution: string | null;
+}
+
+const SEARCH_PLACEHOLDERS: Record<SearchMode, string> = {
+    all: 'Search by topic or keywords',
+    title: 'Enter a paper title',
+    author: 'Enter an author name',
+    doi: 'Enter a DOI, e.g. 10.1038/s41586-024-00000-0',
+    arxiv: 'Enter an arXiv ID or URL, e.g. 2401.01234',
+};
+
 interface HomeProps {
     session: Session | null;
     authLoading: boolean;
@@ -19,6 +37,9 @@ interface HomeProps {
 export default function Home({ session, authLoading, setGlobalAudio, globalAudio, isPlaying, setIsPlaying }: HomeProps) {
     const [query, setQuery] = useState('')
     const [searchedQuery, setSearchedQuery] = useState('')
+    const [searchMode, setSearchMode] = useState<SearchMode>('all')
+    const [searchLabel, setSearchLabel] = useState('')
+    const [authorCandidates, setAuthorCandidates] = useState<AuthorCandidate[]>([])
     const [hasSearched, setHasSearched] = useState(false)
     const [results, setResults] = useState<Paper[]>([])
     const [loading, setLoading] = useState(false)
@@ -43,27 +64,41 @@ export default function Home({ session, authLoading, setGlobalAudio, globalAudio
     const [recType, setRecType] = useState('Trending Today')
     const selectedPaperId = selectedPaper ? getPaperId(selectedPaper) : ''
 
-    const handleSearch = async (e: React.FormEvent) => {
-        e.preventDefault()
-        const submittedQuery = query.trim()
+    const runSearch = async (submittedQuery: string, mode: SearchMode, authorId = '') => {
         if (!submittedQuery) return
         setHasSearched(true)
         setSearchedQuery(submittedQuery)
         setLoading(true)
         setError('')
         setResults([])
+        setSearchLabel('')
+        if (!authorId) setAuthorCandidates([])
         try {
             const headers: Record<string, string> = {}
             if (session?.access_token) headers.Authorization = `Bearer ${session.access_token}`
-            const res = await fetch(`${API_URL}/api/search?q=${encodeURIComponent(submittedQuery)}`, { headers })
+            const params = new URLSearchParams({ q: submittedQuery, mode })
+            if (authorId) params.set('author_id', authorId)
+            const res = await fetch(`${API_URL}/api/search?${params.toString()}`, { headers })
             const data = await res.json()
             if (!res.ok) throw new Error(data.error || 'Search failed')
             setResults(data.results || [])
+            setSearchLabel(data.label || '')
+            setAuthorCandidates(data.authors || [])
         } catch (caught) {
             setError(caught instanceof Error ? caught.message : 'Failed to fetch results')
         } finally {
             setLoading(false)
         }
+    }
+
+    const handleSearch = async (e: React.FormEvent) => {
+        e.preventDefault()
+        await runSearch(query.trim(), searchMode)
+    }
+
+    const selectAuthor = async (author: AuthorCandidate) => {
+        setQuery(author.name)
+        await runSearch(author.name, 'author', author.id)
     }
 
     // Fetch Recommendations on Mount
@@ -249,11 +284,37 @@ export default function Home({ session, authLoading, setGlobalAudio, globalAudio
                     type="text"
                     value={query}
                     onChange={e => setQuery(e.target.value)}
-                    placeholder="Search by topic, author, title, or DOI"
+                    placeholder={SEARCH_PLACEHOLDERS[searchMode]}
                     required
                 />
                 <button type="submit" disabled={loading}>Search</button>
             </form>
+            <details className="advanced-search">
+                <summary>Advanced search</summary>
+                <label htmlFor="search-mode">Search for</label>
+                <select
+                    id="search-mode"
+                    value={searchMode}
+                    onChange={(event) => setSearchMode(event.target.value as SearchMode)}
+                >
+                    <option value="all">Topic or keywords</option>
+                    <option value="title">Paper title</option>
+                    <option value="author">Author</option>
+                    <option value="doi">DOI</option>
+                    <option value="arxiv">arXiv ID or URL</option>
+                </select>
+                <p>
+                    {searchMode === 'author'
+                        ? 'Choose an author match below if the name is ambiguous.'
+                        : searchMode === 'title'
+                            ? 'Title search checks a larger candidate set and prioritizes close title matches.'
+                            : searchMode === 'doi'
+                                ? 'DOI search resolves the matching paper directly.'
+                                : searchMode === 'arxiv'
+                                    ? 'Paste an arXiv identifier or link to find a preprint.'
+                                    : 'Use the default mode to explore a topic across the research catalog.'}
+                </p>
+            </details>
             <div className="search-feedback" aria-live="polite">
                 {loading && <p>Searching the literature…</p>}
                 {error && <p className="notice notice-error" role="alert">{error}</p>}
@@ -282,7 +343,7 @@ export default function Home({ session, authLoading, setGlobalAudio, globalAudio
 
             {!loading && hasSearched && !error && (
                 <div className="section-heading section-heading-row">
-                    <h2>{results.length} {results.length === 1 ? 'result' : 'results'} for “{searchedQuery}”</h2>
+                    <h2>{searchLabel || `${results.length} ${results.length === 1 ? 'result' : 'results'} for “${searchedQuery}”`}</h2>
                     <button
                         type="button"
                         className="text-button"
@@ -292,11 +353,27 @@ export default function Home({ session, authLoading, setGlobalAudio, globalAudio
                             setQuery('')
                             setResults([])
                             setError('')
+                            setSearchLabel('')
+                            setAuthorCandidates([])
                         }}
                     >
                         Clear search
                     </button>
                 </div>
+            )}
+
+            {!loading && hasSearched && authorCandidates.length > 1 && (
+                <section className="author-disambiguation" aria-label="Author matches">
+                    <p>Is this the author you meant?</p>
+                    <div className="author-options">
+                        {authorCandidates.map((author) => (
+                            <button key={author.id} type="button" onClick={() => selectAuthor(author)}>
+                                <span>{author.name}</span>
+                                <small>{author.institution || 'Institution unavailable'} · {author.works_count} works</small>
+                            </button>
+                        ))}
+                    </div>
+                </section>
             )}
 
             <ul className="results-list">

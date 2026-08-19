@@ -3,15 +3,22 @@ const test = require('node:test');
 const {
   buildBriefingQueries,
   buildLibraryBriefingQueries,
+  buildResearchProfile,
   buildWorkFilters,
   fetchBriefingCandidates,
   fetchPersonalizedBriefingCandidates,
+  fetchOpenAlexWorksByAuthor,
   fetchOpenAlexWork,
   fetchOpenAlexWorks,
   isBriefingCandidateRelevant,
   mapOpenAlexWork,
   preferReusableEvidence,
+  rankBriefingCandidates,
+  rankTitleMatches,
   reconstructAbstract,
+  scoreCandidateAgainstProfile,
+  searchOpenAlexAuthors,
+  searchOpenAlexWorksByTitle,
 } = require('../openalex');
 
 const sampleWork = {
@@ -93,6 +100,13 @@ test('buildWorkFilters keeps search cross-disciplinary while excluding unsafe re
   );
 });
 
+test('buildWorkFilters accepts validated additional search constraints', () => {
+  assert.equal(
+    buildWorkFilters({ additionalFilters: ['authorships.author.id:A123'] }),
+    'is_retracted:false,type:!paratext,has_abstract:true,authorships.author.id:A123',
+  );
+});
+
 test('buildBriefingQueries prioritizes explicit interests and strips Boolean syntax', () => {
   assert.deepEqual(buildBriefingQueries({
     keywords: 'predictive coding, retina AND computer vision, predictive coding',
@@ -113,6 +127,62 @@ test('buildLibraryBriefingQueries prefers catalog topics and falls back to paper
     'A saved paper title',
     'A second saved paper',
   ]);
+});
+
+test('buildLibraryBriefingQueries skips broad catalog topics that would attract generic AI results', () => {
+  assert.deepEqual(buildLibraryBriefingQueries([
+    { primary_topic: 'Machine Learning', title: 'Spiking dynamics in visual cortex' },
+  ]), ['Spiking dynamics in visual cortex']);
+});
+
+test('profile scoring keeps neuro-computational candidates and rejects mismatched healthcare AI', () => {
+  const profile = buildResearchProfile({
+    researchInterests: 'computational neuroscience, predictive coding',
+    libraryPapers: [{
+      title: 'Spiking dynamics in visual cortex',
+      abstract: 'Neurons in visual cortex encode predictive errors.',
+      primary_topic: 'Neuroscience',
+    }],
+  });
+  const neuroCandidate = {
+    paper_id: 'W-neuro',
+    title: 'Predictive coding in cortical spiking networks',
+    abstract: 'A computational neuroscience model of visual cortex neurons.',
+    primary_topic: 'Neuroscience',
+  };
+  const healthcareCandidate = {
+    paper_id: 'W-health',
+    title: 'Deep learning for hospital patient diagnosis',
+    abstract: 'A medical model predicts disease in clinical healthcare records.',
+    primary_topic: 'Machine Learning',
+  };
+
+  assert.equal(scoreCandidateAgainstProfile(neuroCandidate, profile).eligible, true);
+  assert.equal(scoreCandidateAgainstProfile(healthcareCandidate, profile).eligible, false);
+  assert.deepEqual(rankBriefingCandidates([healthcareCandidate, neuroCandidate], profile)
+    .map((paper) => paper.paper_id), ['W-neuro']);
+});
+
+test('profile scoring keeps healthcare candidates for users with healthcare interests', () => {
+  const profile = buildResearchProfile({
+    researchInterests: 'clinical diagnosis, healthcare',
+    libraryPapers: [{
+      title: 'Clinical decision support for patient diagnosis',
+      abstract: 'Healthcare systems support clinicians in hospital medicine.',
+      primary_topic: 'Medicine',
+    }],
+  });
+  const healthcareCandidate = {
+    paper_id: 'W-health',
+    title: 'Deep learning for hospital patient diagnosis',
+    abstract: 'A medical model predicts disease in clinical healthcare records.',
+    primary_topic: 'Medicine',
+  };
+
+  assert.equal(profile.healthcareAffinity, true);
+  assert.equal(scoreCandidateAgainstProfile(healthcareCandidate, profile).eligible, true);
+  assert.deepEqual(rankBriefingCandidates([healthcareCandidate], profile)
+    .map((paper) => paper.paper_id), ['W-health']);
 });
 
 test('isBriefingCandidateRelevant rejects single-token fuzzy matches for compound interests', () => {
@@ -168,6 +238,66 @@ test('fetchOpenAlexWork resolves a canonical record by validated identifier', as
   assert.equal(request.config.headers.Authorization, 'Bearer oa-key');
   assert.equal(paper.title, sampleWork.display_name);
   assert.equal(paper.abstract, 'Broad research coverage');
+});
+
+test('fetchOpenAlexWork resolves a DOI through its canonical DOI URL', async () => {
+  let request;
+  const httpClient = {
+    async get(url, config) {
+      request = { url, config };
+      return { data: sampleWork };
+    },
+  };
+  const paper = await fetchOpenAlexWork('doi:10.1000/example', { httpClient });
+  assert.equal(request.url, 'https://api.openalex.org/works/https://doi.org/10.1000/example');
+  assert.equal(paper.doi, '10.1000/example');
+});
+
+test('author search resolves people before filtering their works', async () => {
+  const requests = [];
+  const httpClient = {
+    async get(url, config) {
+      requests.push({ url, config });
+      if (url.endsWith('/authors')) {
+        return { data: { results: [{
+          id: 'https://openalex.org/A123',
+          display_name: 'Ada Author',
+          works_count: 12,
+          cited_by_count: 34,
+          last_known_institutions: [{ display_name: 'Example University' }],
+        }] } };
+      }
+      return { data: { results: [sampleWork] } };
+    },
+  };
+  const authors = await searchOpenAlexAuthors('Ada Author', { httpClient });
+  const works = await fetchOpenAlexWorksByAuthor(authors[0].id, { httpClient });
+
+  assert.deepEqual(authors, [{
+    id: 'A123', name: 'Ada Author', works_count: 12, cited_by_count: 34, institution: 'Example University',
+  }]);
+  assert.equal(requests[1].config.params.filter.includes('authorships.author.id:A123'), true);
+  assert.equal(requests[1].config.params.filter.includes('has_abstract:true'), false);
+  assert.equal(works[0].openalex_id, 'W123456');
+});
+
+test('title search fetches a wider candidate pool and ranks an exact title first', async () => {
+  let request;
+  const httpClient = {
+    async get(_url, config) {
+      request = config;
+      return { data: { results: [
+        { ...sampleWork, display_name: 'Predictive coding in a broader context' },
+        { ...sampleWork, id: 'https://openalex.org/W999', ids: { openalex: 'https://openalex.org/W999' }, display_name: 'Predictive coding in visual cortex' },
+      ] } };
+    },
+  };
+  const papers = await searchOpenAlexWorksByTitle('Predictive coding in visual cortex', { httpClient });
+  assert.equal(request.params.per_page, 50);
+  assert.equal(request.params.filter.includes('has_abstract:true'), false);
+  assert.equal(papers[0].openalex_id, 'W999');
+  assert.deepEqual(rankTitleMatches(papers, 'Predictive coding in visual cortex')
+    .map((paper) => paper.openalex_id), ['W999', 'W123456']);
 });
 
 test('fetchOpenAlexWork rejects identifiers that cannot be sent to the fixed OpenAlex endpoint', async () => {
@@ -290,7 +420,11 @@ test('personalized discovery uses the library first and interests only to fill s
   const libraryResult = { paper_id: 'W2', openalex_id: 'W2', title: 'Adjacent visual learning result' };
   const interestResult = { paper_id: 'W3', openalex_id: 'W3', title: 'Broader neuroscience result' };
   const fetchCandidates = async (queries, options) => {
-    calls.push({ queries, excludedPaperIds: new Set(options.excludedPaperIds) });
+    calls.push({
+      queries,
+      excludedPaperIds: new Set(options.excludedPaperIds),
+      researchProfile: options.researchProfile,
+    });
     return calls.length === 1
       ? { papers: [libraryPaper, libraryResult], lookbackDays: 45 }
       : { papers: [interestResult], lookbackDays: 180 };
@@ -310,6 +444,7 @@ test('personalized discovery uses the library first and interests only to fill s
     ['neuroscience'],
   ]);
   assert.equal(calls[0].excludedPaperIds.has('W1'), true);
+  assert.equal(calls[0].researchProfile.hasSignals, true);
   assert.equal(calls[1].excludedPaperIds.has('W2'), true);
   assert.deepEqual(result.papers.map((paper) => paper.paper_id), ['W2', 'W3']);
   assert.deepEqual(result.stages.map((stage) => stage.source), ['library', 'interests']);

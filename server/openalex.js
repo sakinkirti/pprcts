@@ -36,8 +36,20 @@ function extractPubmedId(value) {
 }
 
 function normalizeDoi(value) {
-  const doi = String(value || '').trim().replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, '');
+  const doi = String(value || '')
+    .trim()
+    .replace(/^doi:\s*/i, '')
+    .replace(/^https?:\/\/(?:dx\.)?doi\.org\//i, '');
   return doi || null;
+}
+
+function isDoi(value) {
+  return /^10\.\d{4,9}\/\S+$/i.test(String(value || ''));
+}
+
+function normalizeAuthorId(value) {
+  const match = String(value || '').match(/(?:^|\/)(A\d+)$/i);
+  return match ? match[1].toUpperCase() : null;
 }
 
 function reconstructAbstract(invertedIndex, maxChars = 60_000) {
@@ -53,6 +65,38 @@ function reconstructAbstract(invertedIndex, maxChars = 60_000) {
   }
   positionedWords.sort((left, right) => left[0] - right[0]);
   return positionedWords.map(([, word]) => word).join(' ').slice(0, maxChars).trim();
+}
+
+function normalizeTitle(value) {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function rankTitleMatches(papers, title) {
+  const normalizedQuery = normalizeTitle(title);
+  const queryTokens = new Set(normalizedQuery.split(' ').filter((token) => token.length >= 2));
+  return papers
+    .map((paper, index) => {
+      const normalizedTitle = normalizeTitle(paper.title);
+      const titleTokens = new Set(normalizedTitle.split(' ').filter(Boolean));
+      const matchedTokens = [...queryTokens].filter((token) => titleTokens.has(token)).length;
+      const exact = normalizedTitle === normalizedQuery;
+      const contains = normalizedTitle.includes(normalizedQuery) || normalizedQuery.includes(normalizedTitle);
+      return {
+        paper,
+        index,
+        score: (exact ? 10_000 : contains ? 5_000 : 0)
+          + matchedTokens * 100
+          - Math.abs(titleTokens.size - queryTokens.size),
+      };
+    })
+    .sort((left, right) => right.score - left.score || left.index - right.index)
+    .map(({ paper }) => paper);
 }
 
 function getLocationUrl(work) {
@@ -140,11 +184,28 @@ function buildLibraryBriefingQueries(libraryPapers, maxQueries = 5) {
     if (paper?.primary_topic) signals.push(paper.primary_topic);
     if (paper?.title) signals.push(paper.title);
   }
-  return buildBriefingQueries({ recentTitles: signals, maxQueries });
+  return buildBriefingQueries({ recentTitles: signals, maxQueries: maxQueries * 2 })
+    .filter((query) => !isGenericLibraryQuery(query))
+    .slice(0, maxQueries);
 }
 
 const BRIEFING_QUERY_STOP_WORDS = new Set([
   'and', 'for', 'from', 'into', 'study', 'the', 'using', 'with',
+]);
+
+const GENERIC_PROFILE_TOKENS = new Set([
+  ...BRIEFING_QUERY_STOP_WORDS,
+  'about', 'ai', 'analysis', 'approach', 'approaches', 'artificial', 'based', 'data', 'dataset',
+  'deep', 'evaluation', 'framework', 'intelligence', 'learning', 'machine', 'method',
+  'methods', 'ml', 'model', 'models', 'modelling', 'modeling', 'network', 'networks', 'new',
+  'novel', 'paper', 'performance', 'predict', 'prediction', 'predictions', 'research',
+  'results', 'system', 'systems', 'training', 'trained', 'use', 'via', 'work', 'works',
+]);
+
+const HEALTHCARE_DOMAIN_TOKENS = new Set([
+  'clinical', 'clinician', 'clinicians', 'diagnosis', 'diagnostic', 'disease', 'diseases',
+  'health', 'healthcare', 'hospital', 'hospitals', 'medical', 'medicine', 'patient',
+  'patients', 'treatment', 'therapy', 'therapeutic',
 ]);
 
 function getBriefingQueryTokens(value) {
@@ -152,6 +213,85 @@ function getBriefingQueryTokens(value) {
     .toLowerCase()
     .match(/[a-z0-9]+/g)
     ?.filter((token) => token.length >= 2 && !BRIEFING_QUERY_STOP_WORDS.has(token)) || [];
+}
+
+function getProfileTokens(value) {
+  return getBriefingQueryTokens(value)
+    .filter((token) => !GENERIC_PROFILE_TOKENS.has(token));
+}
+
+function isGenericLibraryQuery(value) {
+  const tokens = getBriefingQueryTokens(value);
+  return tokens.length > 0 && tokens.every((token) => GENERIC_PROFILE_TOKENS.has(token));
+}
+
+function getCandidateResearchText(paper) {
+  return [paper?.title, paper?.abstract, paper?.primary_topic, paper?.journal]
+    .join(' ')
+    .toLowerCase();
+}
+
+function buildResearchProfile({ libraryPapers = [], researchInterests = '' } = {}) {
+  const explicitPhrases = buildBriefingQueries({ keywords: researchInterests, maxQueries: 20 });
+  const explicitTokens = new Set(explicitPhrases.flatMap(getProfileTokens));
+  const libraryTokenFrequency = new Map();
+
+  for (const paper of libraryPapers) {
+    const documentTokens = new Set(getProfileTokens([
+      paper?.title,
+      paper?.abstract,
+      paper?.primary_topic,
+    ].join(' ')));
+    for (const token of documentTokens) {
+      libraryTokenFrequency.set(token, (libraryTokenFrequency.get(token) || 0) + 1);
+    }
+  }
+
+  const profileTokens = new Set([
+    ...explicitTokens,
+    ...libraryTokenFrequency.keys(),
+  ]);
+  const healthcareAffinity = [...HEALTHCARE_DOMAIN_TOKENS]
+    .some((token) => profileTokens.has(token));
+
+  return {
+    explicitPhrases,
+    explicitTokens,
+    libraryTokenFrequency,
+    healthcareAffinity,
+    hasSignals: explicitTokens.size > 0 || libraryTokenFrequency.size > 0,
+  };
+}
+
+function scoreCandidateAgainstProfile(paper, profile) {
+  if (!profile?.hasSignals) return { eligible: true, score: 0 };
+
+  const text = getCandidateResearchText(paper);
+  const candidateTokens = new Set(getProfileTokens(text));
+  const explicitPhraseMatches = profile.explicitPhrases
+    .filter((phrase) => phrase.length >= 4 && text.includes(phrase.toLowerCase())).length;
+  const explicitTokenMatches = [...profile.explicitTokens]
+    .filter((token) => candidateTokens.has(token)).length;
+  const libraryMatches = [...profile.libraryTokenFrequency.entries()]
+    .filter(([token]) => candidateTokens.has(token));
+  const libraryScore = libraryMatches.reduce(
+    (total, [, frequency]) => total + Math.min(3, frequency),
+    0,
+  );
+  const healthcareMatches = [...HEALTHCARE_DOMAIN_TOKENS]
+    .filter((token) => candidateTokens.has(token)).length;
+  const strongExplicitMatch = explicitPhraseMatches > 0 || explicitTokenMatches >= 2;
+  const strongLibraryMatch = libraryMatches.length >= 3 || libraryScore >= 5;
+  const healthcareMismatch = healthcareMatches > 0 && !profile.healthcareAffinity;
+  const score = explicitPhraseMatches * 30
+    + explicitTokenMatches * 8
+    + libraryScore * 5
+    - (healthcareMismatch ? 24 : 0);
+
+  return {
+    eligible: (strongExplicitMatch || strongLibraryMatch),
+    score,
+  };
 }
 
 function isBriefingCandidateRelevant(paper, query) {
@@ -185,10 +325,36 @@ function preferReusableEvidence(papers, { enabled = true } = {}) {
   return preferred;
 }
 
-function buildWorkFilters({ fromPublicationDate, requireAbstract = true } = {}) {
+function rankBriefingCandidates(papers, profile, { preferReusableFullText = true } = {}) {
+  if (!profile?.hasSignals) return preferReusableEvidence(papers, { enabled: preferReusableFullText });
+  const ranked = papers
+    .map((paper, index) => ({ paper, index, ...scoreCandidateAgainstProfile(paper, profile) }))
+    .filter((candidate) => candidate.eligible)
+    .sort((left, right) => right.score - left.score || left.index - right.index);
+  const result = [];
+
+  // Full text remains a tie-breaker: it can only reorder candidates with the
+  // same research-affinity score, never overcome a stronger profile match.
+  for (let start = 0; start < ranked.length;) {
+    const score = ranked[start].score;
+    let end = start + 1;
+    while (end < ranked.length && ranked[end].score === score) end += 1;
+    result.push(...preferReusableEvidence(
+      ranked.slice(start, end).map((candidate) => candidate.paper),
+      { enabled: preferReusableFullText },
+    ));
+    start = end;
+  }
+  return result;
+}
+
+function buildWorkFilters({ fromPublicationDate, requireAbstract = true, additionalFilters = [] } = {}) {
   const filters = ['is_retracted:false', 'type:!paratext'];
   if (requireAbstract) filters.push('has_abstract:true');
   if (fromPublicationDate) filters.push(`from_publication_date:${fromPublicationDate}`);
+  for (const filter of additionalFilters) {
+    if (typeof filter === 'string' && filter.trim()) filters.push(filter.trim());
+  }
   return filters.join(',');
 }
 
@@ -215,14 +381,68 @@ async function fetchOpenAlexWorks(query, options = {}) {
   return works.map(mapOpenAlexWork).filter(Boolean);
 }
 
+async function searchOpenAlexAuthors(query, options = {}) {
+  const httpClient = options.httpClient || axios;
+  const apiKey = options.apiKey ?? process.env.OPENALEX_API_KEY ?? '';
+  const response = await httpClient.get(`${OPENALEX_API_ORIGIN}/authors`, {
+    params: {
+      search: String(query || '').trim().slice(0, 300),
+      per_page: Math.max(1, Math.min(10, Number(options.perPage) || 5)),
+    },
+    headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
+    timeout: 15_000,
+    maxContentLength: 2 * 1024 * 1024,
+    responseType: 'json',
+  });
+  return (Array.isArray(response?.data?.results) ? response.data.results : [])
+    .map((author) => {
+      const id = normalizeAuthorId(author?.id);
+      if (!id) return null;
+      return {
+        id,
+        name: String(author?.display_name || 'Unnamed author'),
+        works_count: Number(author?.works_count) || 0,
+        cited_by_count: Number(author?.cited_by_count) || 0,
+        institution: author?.last_known_institutions?.[0]?.display_name || null,
+      };
+    })
+    .filter(Boolean);
+}
+
+async function fetchOpenAlexWorksByAuthor(authorId, options = {}) {
+  const normalizedAuthorId = normalizeAuthorId(authorId);
+  if (!normalizedAuthorId) {
+    const error = new Error('Unsupported author identifier');
+    error.code = 'INVALID_AUTHOR_ID';
+    throw error;
+  }
+  return fetchOpenAlexWorks('', {
+    ...options,
+    perPage: Math.max(1, Math.min(100, Number(options.perPage) || 50)),
+    requireAbstract: options.requireAbstract ?? false,
+    additionalFilters: [...(options.additionalFilters || []), `authorships.author.id:${normalizedAuthorId}`],
+  });
+}
+
+async function searchOpenAlexWorksByTitle(title, options = {}) {
+  const papers = await fetchOpenAlexWorks(title, {
+    ...options,
+    perPage: Math.max(1, Math.min(100, Number(options.perPage) || 50)),
+    requireAbstract: options.requireAbstract ?? false,
+  });
+  return rankTitleMatches(papers, title);
+}
+
 async function fetchOpenAlexWork(identifier, options = {}) {
   const httpClient = options.httpClient || axios;
   const apiKey = options.apiKey ?? process.env.OPENALEX_API_KEY ?? '';
   const openAlexId = extractOpenAlexId(identifier);
+  const doi = normalizeDoi(identifier);
   const pubmedId = /^\d{1,12}$/.test(String(identifier || ''))
     ? String(identifier)
     : null;
-  const lookup = openAlexId || (pubmedId ? `pmid:${pubmedId}` : null);
+  const lookup = openAlexId || (pubmedId ? `pmid:${pubmedId}` : null)
+    || (isDoi(doi) ? `https://doi.org/${doi}` : null);
   if (!lookup) {
     const error = new Error('Unsupported paper identifier');
     error.code = 'INVALID_PAPER_ID';
@@ -291,7 +511,9 @@ async function fetchBriefingCandidates(queries, options = {}) {
         fromPublicationDate: recentDate(lookbackDays, now),
       });
       const relevantPapers = papers.filter((paper) => isBriefingCandidateRelevant(paper, query));
-      return preferReusableEvidence(relevantPapers, { enabled: canRetrievePreferredEvidence });
+      return rankBriefingCandidates(relevantPapers, options.researchProfile, {
+        preferReusableFullText: canRetrievePreferredEvidence,
+      });
     }));
 
     // Round-robin selection prevents one broad interest from dominating all
@@ -343,6 +565,7 @@ async function fetchPersonalizedBriefingCandidates({
 
   const libraryQueries = buildLibraryBriefingQueries(libraryPapers);
   const interestQueries = buildBriefingQueries({ keywords: researchInterests });
+  const researchProfile = buildResearchProfile({ libraryPapers, researchInterests });
   const papers = [];
   const stages = [];
 
@@ -353,6 +576,7 @@ async function fetchPersonalizedBriefingCandidates({
       ...candidateOptions,
       maxResults: maxResults - papers.length,
       excludedPaperIds,
+      researchProfile,
     });
 
     for (const paper of result.papers || []) {
@@ -384,9 +608,11 @@ module.exports = {
   OPENALEX_WORK_FIELDS,
   buildBriefingQueries,
   buildLibraryBriefingQueries,
+  buildResearchProfile,
   buildWorkFilters,
   extractOpenAlexId,
   extractPubmedId,
+  fetchOpenAlexWorksByAuthor,
   fetchOpenAlexWork,
   fetchOpenAlexWorks,
   fetchBriefingCandidates,
@@ -394,7 +620,14 @@ module.exports = {
   isBriefingCandidateRelevant,
   mapOpenAlexWork,
   normalizeDoi,
+  normalizeAuthorId,
+  normalizeTitle,
   preferReusableEvidence,
+  rankBriefingCandidates,
   recentDate,
   reconstructAbstract,
+  rankTitleMatches,
+  searchOpenAlexAuthors,
+  searchOpenAlexWorksByTitle,
+  scoreCandidateAgainstProfile,
 };
